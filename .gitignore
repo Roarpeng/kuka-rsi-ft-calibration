@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Runtime / calibration outputs
+*.csv
+ft_calibration.json
+ft_calibration_samples.json
+
+# Tooling / IDE
+.claude/
+.graphflow-cache/
+graphflow-out/
+Cursor/
+.idea/
+.vscode/
+*.swp
+.DS_Store

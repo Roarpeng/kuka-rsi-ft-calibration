@@ -1,0 +1,36 @@
+{
+  "mode": "record_only",
+  "gravity_mps2": 9.81,
+  "rsi_rotation_order": "ZYX",
+  "sensor_to_flange": {
+    "translation_m": [0.0, 0.0, 0.035],
+    "rotation_deg": [0.0, 0.0, 0.0],
+    "rotation_order": "ZYX"
+  },
+  "flange_to_tcp": {
+    "translation_m": [0.0, 0.150, 0.230],
+    "rotation_deg": [0.0, 0.0, 0.0],
+    "rotation_order": "ZYX"
+  },
+  "scale": {
+    "force_scales": [0.001, 0.001, 0.001],
+    "torque_scales": [0.001, 0.001, 0.001],
+    "raw_bias": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+    "torque_unit": "N_m"
+  },
+  "static_detection": {
+    "window_size": 50,
+    "min_dwell_seconds": 0.8,
+    "position_threshold_m": 0.0008,
+    "angle_threshold_deg": 0.25,
+    "force_std_threshold_n": 1.5,
+    "torque_std_threshold_nm": 0.08,
+    "min_pose_separation_deg": 12.0,
+    "min_samples": 12,
+    "max_samples": 20
+  },
+  "files": {
+    "calibration_path": "ft_calibration.json",
+    "sample_path": "ft_calibration_samples.json"
+  }
+}
