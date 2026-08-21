@@ -41,14 +41,14 @@ def _parse_scale(payload: dict[str, Any]) -> ScaleCalibration:
 def _parse_static_detection(payload: dict[str, Any]) -> StaticDetectionConfig:
     return StaticDetectionConfig(
         window_size=int(payload.get("window_size", 50)),
-        min_dwell_seconds=float(payload.get("min_dwell_seconds", 0.8)),
+        min_dwell_seconds=float(payload.get("min_dwell_seconds", 0.4)),
         position_threshold_m=float(payload.get("position_threshold_m", 0.0008)),
         angle_threshold_deg=float(payload.get("angle_threshold_deg", 0.25)),
         force_std_threshold_n=float(payload.get("force_std_threshold_n", 1.5)),
         torque_std_threshold_nm=float(payload.get("torque_std_threshold_nm", 0.08)),
         min_pose_separation_deg=float(payload.get("min_pose_separation_deg", 12.0)),
         min_samples=int(payload.get("min_samples", 12)),
-        max_samples=int(payload.get("max_samples", 20)),
+        max_samples=int(payload.get("max_samples", 12)),
     )
 
 

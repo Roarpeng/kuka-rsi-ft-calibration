@@ -17,10 +17,11 @@
 
 ### 采集与标定方式
 - 标定采用多个静止姿态，不采用连续运动标定。
-- 每个姿态通过机器人到位信号 (`InPosition`) 触发采样。
-- 机器人到位后持续采集直到达到最小区间时间。
-- 每个静止段取均值作为一个标定样本。
-- 姿态数量采用较稳妥方案，建议 12 到 20 个分散姿态。
+- 每个姿态通过 RSI 布尔信号 `data_collection` 触发采样。
+- `data_collection=TRUE` 时累积帧；变为 `FALSE` 时对本段取均值生成一条样本。
+- 建议每姿态保持 TRUE 约 0.5s（最短采集时长默认 0.4s）。
+- 姿态数量默认最少 6、最多 12；不够稳可增加到 12。
+- 输出坐标系为 TCP；暂不做运动惯性补偿。
 
 ### 力传感器条件
 - 力传感器输出当前仍是原始值。
@@ -81,13 +82,12 @@
 
 当前文件负责：
 - 连续接收每帧数据。
-- 自动判断最近窗口是否静止。
-- 对静止段累计采样。
-- 生成均值样本。
+- 按 `data_collection` 边沿累积/结束采样段。
+- 对采样段取均值生成样本。
 - 判断姿态是否重复。
 - 达到最少样本数后自动求解标定。
 - 保存样本和标定结果。
-- 在运行模式下做实时补偿。
+- 在运行模式下做实时 TCP 补偿。
 
 ## 已创建的配置文件
 
@@ -109,9 +109,9 @@
 ```bash
 python3 udp_server.py --calibrate
 ```
-- 自动检测静止姿态并采样
-- 达到最少样本数（12 个）后自动求解标定参数
-- 标定结果保存到 `ft_calibration.json`
+- 由 `data_collection` 触发采样（TRUE 采集，FALSE 结束并取均值）
+- 达到最少样本数（默认 6 个）后自动求解标定参数
+- 标定结果保存到 `ft_calibration.json`，并切换到 TCP 补偿
 
 ### 运行模式
 ```bash
@@ -136,27 +136,26 @@ python3 udp_server.py --calibrate --ip 192.168.2.10 --port 59152
 
 ## KUKA 侧 RSI 配置
 
-### 到位信号 `InPosition`
+### 采样触发信号 `data_collection`
 
-需要在 KUKA RSI 配置中添加 `InPosition` 信号，用于指示机器人是否运动到位。
+需要在 KUKA RSI 配置中添加 `data_collection` 布尔信号，用于手动/程序触发标定采样。
 
 **RSI 对象配置示例：**
 ```xml
-<InPosition>
-  <Tag>your_in_position_signal</Tag>
+<data_collection>
+  <Tag>your_data_collection_signal</Tag>
   <Type>BOOL</Type>
   <Index>13</Index>
-</InPosition>
+</data_collection>
 ```
 
 **KUKA 程序逻辑：**
-- 机器人运动到目标位置后，将 `InPosition` 置为 `TRUE`
-- 开始下一段运动前，保持 `InPosition` 为 `TRUE`
-- 如果使用 KUKA 系统变量，可以关联 `$APO_STATE` 或 `$MOV_STATE` 等到位标志
+- 机器人运动到目标姿态后，将 `data_collection` 置为 `TRUE` 约 0.5s
+- 采集结束后置回 `FALSE`，再运动到下一姿态
 
 **数据处理逻辑：**
-- 当 `InPosition = FALSE` 时，程序认为机器人在运动中，不清除采样缓存
-- 当 `InPosition = TRUE` 时，程序开始累积采样，达到最小区间时间后生成一个样本
+- `data_collection = TRUE`：累积位姿与力数据
+- `data_collection` 由 TRUE→FALSE：对本段取均值，生成一条标定样本
 
 ### 数据发送顺序
 
@@ -167,25 +166,24 @@ RSI 发送的数据元素顺序必须与 Python 端一致：
 | 1-6 | Fx_raw ~ Mz_raw | LONG | 六维力传感器原始值 |
 | 7-9 | Act_X ~ Act_Z | DOUBLE | TCP 位置 (mm) |
 | 10-12 | Act_A ~ Act_C | DOUBLE | TCP 姿态角 (度) |
-| 13 | InPosition | BOOL | 到位标记 |
+| 13 | data_collection | BOOL | 标定采样触发 |
 
 ## 当前程序能力边界
 
-当前程序已经完成基础可运行框架，并支持命令行模式选择和到位信号交互。
+当前程序已经完成基础可运行框架，并支持命令行模式选择与 `data_collection` 采样交互。
 
 当前已具备：
 - UDP 实时接收。
-- RSI XML 解析。
+- RSI XML 解析（含 BOOL `data_collection`）。
 - CSV 持续记录。
 - 原始值缩放。
-- 机器人到位信号检测。
-- 静止段采样。
+- `data_collection` 边沿采样与均值。
 - 标定结果求解。
-- 运行时补偿接口。
+- 运行时 TCP 补偿。
 - 命令行模式选择（--calibrate / --run / 默认）。
 
-当前还需要继续完善或现场确认：
-- KUKA 侧 RSI 配置中添加 InPosition 信号。
+当前还需要现场确认：
+- RSI XML 标签名确为 `data_collection`（与 Python 端一致）。
 - 用在线数据做验证。
 - 检查补偿后在空载无接触时是否接近 0。
 - 检查接触时 TCP 坐标系输出方向是否符合预期。
@@ -199,7 +197,7 @@ RSI 发送的数据元素顺序必须与 Python 端一致：
 推荐按下面顺序继续：
 
 1. 启动标定模式：`python3 udp_server.py --calibrate`
-2. 将机器人运动到 12-20 个不同姿态，每个姿态停留约 1 秒。
+2. 遥控到 6–9 个不同姿态；每姿态 `data_collection` TRUE 约 0.5s 再 FALSE。
 3. 标定完成后自动切换到运行模式。
 4. 检查空载补偿结果是否接近 0。
 5. 检查受力时 TCP 输出方向和大小是否合理。

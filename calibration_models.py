@@ -27,14 +27,14 @@ class EulerTransform:
 @dataclass
 class StaticDetectionConfig:
     window_size: int = 50
-    min_dwell_seconds: float = 0.8
+    min_dwell_seconds: float = 0.4
     position_threshold_m: float = 0.0008
     angle_threshold_deg: float = 0.25
     force_std_threshold_n: float = 1.5
     torque_std_threshold_nm: float = 0.08
     min_pose_separation_deg: float = 12.0
     min_samples: int = 12
-    max_samples: int = 20
+    max_samples: int = 12
 
 
 @dataclass

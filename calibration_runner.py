@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from collections import deque
-from dataclasses import asdict
 from datetime import datetime
 from typing import Any
 
@@ -11,9 +10,6 @@ from calibration_math import (
     convert_raw_to_wrench,
     euler_to_matrix,
     fit_gravity_model,
-    matrix_multiply,
-    matrix_transpose,
-    matrix_vector_multiply,
     norm,
     vector_mean,
     vector_std,
@@ -29,6 +25,8 @@ class CalibrationRunner:
         self.samples: list[CalibrationSample] = []
         self.calibration_result: CalibrationResult | None = None
         self.last_sample_angles: list[float] | None = None
+        self._was_collecting = False
+        self._last_logged_dc: bool | None = None
         self.sensor_to_tcp_rotation, self.sensor_to_tcp_translation_m = self._build_sensor_to_tcp()
 
     def _build_sensor_to_tcp(self) -> tuple[list[list[float]], list[float]]:
@@ -64,29 +62,82 @@ class CalibrationRunner:
         return frame
 
     def _update_sampling(self, frame: dict[str, Any]) -> str:
-        in_position = frame.get("in_position", False)
+        """TRUE 采集；FALSE 边沿结束；若 FALSE 未到达，静止满 min_dwell 也自动成样。"""
+        collecting = bool(frame.get("data_collection", False))
+        if collecting != self._last_logged_dc:
+            print(f"[标定] data_collection -> {collecting}")
+            self._last_logged_dc = collecting
 
-        # 如果机器人未到位，继续等待
-        if not in_position:
-            if self.current_segment:
-                self.current_segment.clear()
-            return "moving"
+        if not collecting:
+            if self._was_collecting:
+                self._was_collecting = False
+                return self._finalize_segment()
+            self.current_segment.clear()
+            return "idle"
 
-        # 机器人已到位，开始采集当前帧
+        if not self._was_collecting:
+            self.current_segment.clear()
+        self._was_collecting = True
         self.current_segment.append(frame)
+
+        # 运动中不要把过渡帧混进均值
+        if not self._segment_is_stable(self.current_segment):
+            self.current_segment = [frame]
+            return "collecting_moving"
+
         duration_seconds = self._segment_duration_seconds(self.current_segment)
-
         if duration_seconds < self.config.static_detection.min_dwell_seconds:
-            return "holding"
+            return "collecting"
 
-        sample = self._build_sample(self.current_segment)
-        self.current_segment.clear()
+        # TRUE 一直为 1 时：静止满时长也生成样本，然后清空等待新姿态
+        status = self._finalize_segment()
+        self._was_collecting = True
+        return status
+
+    def _segment_is_stable(self, segment: list[dict[str, Any]]) -> bool:
+        if len(segment) < 5:
+            return True
+        positions = [[f["Act_X"], f["Act_Y"], f["Act_Z"]] for f in segment]
+        angles = [[f["Act_A"], f["Act_B"], f["Act_C"]] for f in segment]
+        position_spread = max(self._axis_span(positions, axis) for axis in range(3))
+        angle_spread = max(self._axis_span(angles, axis) for axis in range(3))
+        return (
+            position_spread <= self.config.static_detection.position_threshold_m
+            and angle_spread <= self.config.static_detection.angle_threshold_deg
+        )
+
+    def _finalize_segment(self) -> str:
+        segment = self.current_segment
+        self.current_segment = []
+        if not segment:
+            return "idle"
+
+        duration_seconds = self._segment_duration_seconds(segment)
+        if duration_seconds < self.config.static_detection.min_dwell_seconds:
+            print(
+                f"[标定] 采集段过短 ({duration_seconds:.3f}s < "
+                f"{self.config.static_detection.min_dwell_seconds:.3f}s)，已丢弃"
+            )
+            return "segment_too_short"
+
+        if len(self.samples) >= self.config.static_detection.max_samples:
+            print(f"[标定] 已达最多样本数 {self.config.static_detection.max_samples}，忽略新样本")
+            return "max_samples_reached"
+
+        sample = self._build_sample(segment)
         if not self._sample_is_distinct(sample):
+            print("[标定] 姿态与上一条过于接近，已丢弃（请换更分散的姿态）")
             return "duplicate_pose"
 
         self.samples.append(sample)
         self.last_sample_angles = sample.tcp_angles_deg
         save_samples(self.config.files.sample_path, self.samples)
+        print(
+            f"[标定] 样本 {len(self.samples)}/"
+            f"{self.config.static_detection.min_samples} "
+            f"(帧数={sample.frame_count}, 时长={sample.duration_seconds:.3f}s, "
+            f"姿态 A/B/C={sample.tcp_angles_deg[0]:.1f}/{sample.tcp_angles_deg[1]:.1f}/{sample.tcp_angles_deg[2]:.1f})"
+        )
 
         if len(self.samples) >= self.config.static_detection.min_samples:
             self.calibration_result = fit_gravity_model(
@@ -97,30 +148,15 @@ class CalibrationRunner:
                 rsi_rotation_order=self.config.rsi_rotation_order,
             )
             save_calibration_result(self.config.files.calibration_path, self.calibration_result)
-            if self.config.mode == "calibration_collect":
-                self.config.mode = "calibrated_runtime"
+            self.config.mode = "calibrated_runtime"
+            print(
+                f"[标定] 完成：mass={self.calibration_result.mass_kg:.3f} kg, "
+                f"残差力 RMS={self.calibration_result.residual_force_rms_n:.3f} N, "
+                f"残差力矩 RMS={self.calibration_result.residual_torque_rms_nm:.3f} N·m"
+            )
+            print("[标定] 已切换到运行补偿模式（TCP 受力输出）")
             return "calibration_ready"
         return "sample_saved"
-
-    def _window_is_static(self) -> bool:
-        if len(self.window) < self.window.maxlen:
-            return False
-        positions = [[frame["Act_X"], frame["Act_Y"], frame["Act_Z"]] for frame in self.window]
-        angles = [[frame["Act_A"], frame["Act_B"], frame["Act_C"]] for frame in self.window]
-        wrenches = [frame["sensor_wrench"] for frame in self.window]
-
-        position_spread = max(self._axis_span(positions, axis) for axis in range(3))
-        angle_spread = max(self._axis_span(angles, axis) for axis in range(3))
-        wrench_std = vector_std(wrenches, vector_mean(wrenches))
-        force_std = max(wrench_std[:3])
-        torque_std = max(wrench_std[3:6])
-
-        return (
-            position_spread <= self.config.static_detection.position_threshold_m and
-            angle_spread <= self.config.static_detection.angle_threshold_deg and
-            force_std <= self.config.static_detection.force_std_threshold_n and
-            torque_std <= self.config.static_detection.torque_std_threshold_nm
-        )
 
     def _build_sample(self, segment: list[dict[str, Any]]) -> CalibrationSample:
         raw_vectors = [
@@ -131,14 +167,13 @@ class CalibrationRunner:
         raw_mean = vector_mean(raw_vectors)
         sensor_mean = vector_mean(sensor_vectors)
         sensor_std = vector_std(sensor_vectors, sensor_mean)
-        first_frame = segment[0]
-        last_frame = segment[-1]
+        mid_frame = segment[len(segment) // 2]
         return CalibrationSample(
-            timestamp=last_frame["timestamp"],
+            timestamp=segment[-1]["timestamp"],
             frame_count=len(segment),
             duration_seconds=self._segment_duration_seconds(segment),
-            tcp_position_m=[last_frame["Act_X"], last_frame["Act_Y"], last_frame["Act_Z"]],
-            tcp_angles_deg=[last_frame["Act_A"], last_frame["Act_B"], last_frame["Act_C"]],
+            tcp_position_m=[mid_frame["Act_X"], mid_frame["Act_Y"], mid_frame["Act_Z"]],
+            tcp_angles_deg=[mid_frame["Act_A"], mid_frame["Act_B"], mid_frame["Act_C"]],
             raw_mean=raw_mean,
             sensor_mean=sensor_mean,
             sensor_std=sensor_std,

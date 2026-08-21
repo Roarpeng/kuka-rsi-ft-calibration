@@ -29,6 +29,8 @@ class RSIConfig:
     ONLYSEND: bool = False  # FALSE：双向闭环，必须回传 IPOC 和 RKorr
     ROBOT_IP: str = "192.168.2.10"
     BIND_IP: str = "0.0.0.0"
+    # 采集/运行时默认回传全 0；仅链路测试可改为随机扰动
+    reply_zeros: bool = True
     rkorr_min: float = -0.1
     rkorr_max: float = 0.1
     rkorr: dict[str, float] = field(
@@ -61,7 +63,7 @@ class RSIData:
     timestamp: str = ""
     iPOC: int = 0
     ipoc_text: str = "0"
-    in_position: bool = False  # 机器人到位标记
+    data_collection: bool = False  # 标定采样触发：true 采集，false 不采集
     sensor_fx: float = 0.0
     sensor_fy: float = 0.0
     sensor_fz: float = 0.0
@@ -107,6 +109,7 @@ SAMPLE_ROB_XML = (
     "<Mx_raw>1</Mx_raw><My_raw>2</My_raw><Mz_raw>3</Mz_raw>"
     "<Act_X>903.0</Act_X><Act_Y>-80.5</Act_Y><Act_Z>1213.1</Act_Z>"
     "<Act_A>-83.7</Act_A><Act_B>0.8</Act_B><Act_C>179.8</Act_C>"
+    "<data_collection>FALSE</data_collection>"
     "<IPOC>123645634563</IPOC>"
     "</Rob>"
 )
@@ -129,6 +132,7 @@ class RSIServer:
         ("Act_A", "DOUBLE", 10),
         ("Act_B", "DOUBLE", 11),
         ("Act_C", "DOUBLE", 12),
+        ("data_collection", "BOOL", 13),
     ]
 
     # 对应机器人 RSI XML 的 RECEIVE/ELEMENTS（上位机 -> 机器人）
@@ -142,7 +146,7 @@ class RSIServer:
     ]
 
     CSV_HEADER = [
-        "timestamp", "iPOC", "in_position",
+        "timestamp", "iPOC", "data_collection",
         "Fx_raw", "Fy_raw", "Fz_raw", "Mx_raw", "My_raw", "Mz_raw",
         "Act_X", "Act_Y", "Act_Z", "Act_A", "Act_B", "Act_C",
         "sensor_Fx_N", "sensor_Fy_N", "sensor_Fz_N", "sensor_Mx_Nm", "sensor_My_Nm", "sensor_Mz_Nm",
@@ -168,9 +172,21 @@ class RSIServer:
     def start(self, enable_csv: bool = True):
         """启动 UDP 服务器"""
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        server_address = (self.config.BIND_IP, self.config.PORT)
-        self.sock.bind(server_address)
+        # 不复用端口：避免与调试助手等同时占用 59152 时“看似在听、实际收不到”
+        if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+            self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        bind_ip = self.config.BIND_IP
+        if bind_ip in ("0.0.0.0", ""):
+            # RSI 发到 IP_NUMBER；优先绑到该地址，避免多网卡歧义
+            bind_ip = self.config.IP_NUMBER
+        server_address = (bind_ip, self.config.PORT)
+        try:
+            self.sock.bind(server_address)
+        except OSError as error:
+            raise OSError(
+                f"无法绑定 {server_address[0]}:{server_address[1]}。"
+                f"请关闭调试助手/其它占用该端口的程序后重试。原始错误: {error}"
+            ) from error
         self.sock.settimeout(0.2)
 
         print("KUKA RSI UDP 服务器已启动")
@@ -180,6 +196,8 @@ class RSIServer:
         print(f"SENTYPE={self.config.SENTYPE}  ONLYSEND={self.config.ONLYSEND}")
         if self.config.ONLYSEND:
             print("RSI 回复：关闭（只收不发，机器人会超时）")
+        elif self.config.reply_zeros:
+            print("RSI 回复：开启（Sen/RKorr 全 0，IPOC 回传接收值）")
         else:
             print(
                 f"RSI 回复：开启（Sen/RKorr 每包随机 "
@@ -190,6 +208,7 @@ class RSIServer:
         if self.calibration_config is not None:
             print(f"当前模式：{self.calibration_config.mode}")
             print(f"标定文件：{self.calibration_config.files.calibration_path}")
+        print("注意：请先关闭调试助手；切换接收程序后请在示教器重新启动 RSI")
         print("\n按 Ctrl+C 停止服务器\n")
 
         if enable_csv:
@@ -204,6 +223,7 @@ class RSIServer:
         if self.csv_writer is None:
             raise RuntimeError("CSV writer initialization failed")
         self.csv_writer.writerow(self.CSV_HEADER)
+        self.csv_file.flush()
         print(f"CSV 文件已创建：{self.csv_filename}")
 
     def parse_rsi_xml(self, xml_data: bytes) -> Optional[RSIData]:
@@ -228,11 +248,12 @@ class RSIServer:
                         setattr(rsi_data, tag, int(value))
                     elif elem_type == "DOUBLE":
                         setattr(rsi_data, tag, float(value))
-
-            # 当前机器人 XML 未配置 InPosition，有则兼容解析
-            in_pos = root.find(".//InPosition")
-            if in_pos is not None and in_pos.text:
-                rsi_data.in_position = in_pos.text.strip().upper() in ("1", "TRUE")
+                    elif elem_type == "BOOL":
+                        # KUKA 常见：1/0、TRUE/FALSE；缺省或空文本视为 False
+                        setattr(rsi_data, tag, value.upper() in ("1", "TRUE", "YES", "ON"))
+                elif elem_type == "BOOL" and tag == "data_collection":
+                    # 标签存在但无文本时保持 False
+                    setattr(rsi_data, tag, False)
 
             return rsi_data
 
@@ -254,7 +275,10 @@ class RSIServer:
         scalar_tags: list[tuple[str, str]] = []
 
         for tag, _, _ in self.RECEIVE_ELEMENTS:
-            value = random.uniform(self.config.rkorr_min, self.config.rkorr_max)
+            if self.config.reply_zeros:
+                value = 0.0
+            else:
+                value = random.uniform(self.config.rkorr_min, self.config.rkorr_max)
             self.config.rkorr[tag] = value
             text = f"{value:.4f}"
             if "." in tag:
@@ -280,7 +304,7 @@ class RSIServer:
         frame = {
             "timestamp": rsi_data.timestamp,
             "iPOC": rsi_data.iPOC,
-            "in_position": rsi_data.in_position,
+            "data_collection": rsi_data.data_collection,
             "Fx_raw": rsi_data.Fx_raw,
             "Fy_raw": rsi_data.Fy_raw,
             "Fz_raw": rsi_data.Fz_raw,
@@ -319,7 +343,7 @@ class RSIServer:
             row = [
                 rsi_data.timestamp,
                 rsi_data.iPOC,
-                1 if rsi_data.in_position else 0,
+                1 if rsi_data.data_collection else 0,
                 rsi_data.Fx_raw, rsi_data.Fy_raw, rsi_data.Fz_raw,
                 rsi_data.Mx_raw, rsi_data.My_raw, rsi_data.Mz_raw,
                 rsi_data.Act_X, rsi_data.Act_Y, rsi_data.Act_Z,
@@ -350,18 +374,22 @@ class RSIServer:
             return False
         reply = self.generate_response(parsed)
         tags = [tag for tag, _, _ in self.RECEIVE_ELEMENTS]
-        rkorr_ok = all(
-            self.config.rkorr_min <= self.config.rkorr[tag] <= self.config.rkorr_max
-            for tag in tags
-        )
+        if self.config.reply_zeros:
+            rkorr_ok = all(self.config.rkorr[tag] == 0.0 for tag in tags)
+            rkorr_text_ok = 'X="0.0000"' in reply and 'C="0.0000"' in reply
+        else:
+            rkorr_ok = all(
+                self.config.rkorr_min <= self.config.rkorr[tag] <= self.config.rkorr_max
+                for tag in tags
+            )
+            rkorr_text_ok = 'X="' in reply and 'C="' in reply
         ok = (
             parsed.Fx_raw == 100
             and parsed.Act_C == 179.8
             and parsed.ipoc_text == "123645634563"
             and f'Type="{self.config.SENTYPE}"' in reply
             and "<RKorr " in reply
-            and 'X="' in reply
-            and 'C="' in reply
+            and rkorr_text_ok
             and "<RKorr.X>" not in reply
             and rkorr_ok
             and "<IPOC>123645634563</IPOC>" in reply
@@ -500,14 +528,19 @@ class RSIServer:
             if self.sock is None:
                 raise RuntimeError("UDP socket initialization failed")
             packet_count = 0
+            wait_started = time.monotonic()
+            last_wait_print = wait_started
+            seen_sources: set[tuple] = set()
 
             while True:
                 try:
                     data, address = self.sock.recvfrom(4096)
 
+                    if address not in seen_sources:
+                        seen_sources.add(address)
+                        print(f"\n收到来自 {address} 的 UDP（源 {len(seen_sources)}）")
                     if self.client_address is None:
                         self.client_address = address
-                        print(f"\n收到来自 {address} 的连接")
 
                     rsi_data = self.parse_rsi_xml(data)
 
@@ -530,6 +563,7 @@ class RSIServer:
                             print(f"  Mx_raw={rsi_data.Mx_raw}, My_raw={rsi_data.My_raw}, Mz_raw={rsi_data.Mz_raw}")
                             print(f"  Act_X={rsi_data.Act_X:.3f}, Act_Y={rsi_data.Act_Y:.3f}, Act_Z={rsi_data.Act_Z:.3f}")
                             print(f"  Act_A={rsi_data.Act_A:.3f}, Act_B={rsi_data.Act_B:.3f}, Act_C={rsi_data.Act_C:.3f}")
+                            print(f"  data_collection={rsi_data.data_collection}")
                             print(f"  Sensor(N/Nm)=({rsi_data.sensor_fx:.3f}, {rsi_data.sensor_fy:.3f}, {rsi_data.sensor_fz:.3f}, {rsi_data.sensor_mx:.3f}, {rsi_data.sensor_my:.3f}, {rsi_data.sensor_mz:.3f})")
                             print(f"  TCP补偿后(N/Nm)=({rsi_data.tcp_fx:.3f}, {rsi_data.tcp_fy:.3f}, {rsi_data.tcp_fz:.3f}, {rsi_data.tcp_mx:.3f}, {rsi_data.tcp_my:.3f}, {rsi_data.tcp_mz:.3f})")
                             rk = self.config.rkorr
@@ -546,6 +580,17 @@ class RSIServer:
                         self.rsi_data_list.append(rsi_data)
 
                 except socket.timeout:
+                    if packet_count == 0:
+                        now = time.monotonic()
+                        if now - last_wait_print >= 2.0:
+                            waited = now - wait_started
+                            print(
+                                f"等待机器人 UDP 中… {waited:.0f}s "
+                                f"(期望源 {self.config.ROBOT_IP} -> "
+                                f"{self.config.IP_NUMBER}:{self.config.PORT}；"
+                                f"若刚关调试助手，请在示教器重新启动 RSI)"
+                            )
+                            last_wait_print = now
                     continue
 
         except KeyboardInterrupt:
@@ -625,9 +670,15 @@ def main():
 
     if args.test_link:
         print("=== 链路联通测试 ===")
+        # 链路测试仍可随机 RKorr，便于确认回包字段在变
+        config.reply_zeros = False
         server = RSIServer(config=config)
         ok = server.run_link_test(wait_seconds=args.test_seconds)
         sys.exit(0 if ok else 1)
+
+    # 标定/运行：收包必须回包，RKorr 全 0，避免扰动机器人
+    config.reply_zeros = True
+    config.ONLYSEND = False
 
     calibration_config = load_config()
 
@@ -636,16 +687,21 @@ def main():
         print("=== 标定模式 ===")
         print(f"最少样本数：{calibration_config.static_detection.min_samples}")
         print(f"最多样本数：{calibration_config.static_detection.max_samples}")
-        print("请将机器人运动到多个不同姿态，每个姿态停留约 1 秒")
-        print("达到最少样本数后自动保存标定结果并切换到运行模式\n")
+        print(f"最短采集时长：{calibration_config.static_detection.min_dwell_seconds}s")
+        print("RSI 回包：RKorr 全 0（收包即回，维持双向闭环）")
+        print("操作：每个姿态保持静止约 0.5s（data_collection 建议为 TRUE）")
+        print("说明：UDP 中若 FALSE 未到达，静止满时长也会自动生成样本；姿态需分散")
+        print("达到最少样本数后自动求解并切换到 TCP 补偿运行模式\n")
     elif args.run:
         calibration_config.mode = "calibrated_runtime"
         print("=== 运行模式 ===")
-        print("使用已有标定结果进行实时重力补偿\n")
+        print("使用已有标定结果进行实时重力补偿")
+        print("RSI 回包：RKorr 全 0（收包即回，维持双向闭环）\n")
     else:
         calibration_config.mode = "record_only"
         print("=== 仅记录模式 ===")
-        print("记录原始数据，不做标定或补偿\n")
+        print("记录原始数据，不做标定或补偿")
+        print("RSI 回包：RKorr 全 0（收包即回，维持双向闭环）\n")
 
     server = RSIServer(config=config)
     server.calibration_config = calibration_config

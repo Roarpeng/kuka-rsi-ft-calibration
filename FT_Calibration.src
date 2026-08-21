@@ -1,0 +1,126 @@
+&ACCESS RVP
+&REL 3
+&COMMENT Force Sensor Gravity Calibration - Diversified Poses
+DEF FT_Calibration ( )
+  ;FOLD INI;%{PE}
+    GLOBAL INTERRUPT DECL 3 WHEN $STOPMESS==TRUE DO IR_STOPM ( )
+    INTERRUPT ON 3 
+    BAS (#INITMOV, 0)
+  ;ENDFOLD (BASISTECH INI)
+
+  ;FOLD SPTP HOME Vel=100 % DEFAULT ;%{PE}
+  ;FOLD Parameters ;%{h}
+  ;Params IlfProvider=kukaroboter.basistech.inlineforms.movement.spline; Kuka.IsGlobalPoint=False; Kuka.PointName=HOME; Kuka.BlendingEnabled=False; Kuka.MoveDataPtpName=DEFAULT; Kuka.VelocityPtp=100; Kuka.VelocityFieldEnabled=True; Kuka.CurrentCDSetIndex=0; Kuka.MovementParameterFieldEnabled=True; IlfCommand=SPTP
+  ;ENDFOLD
+  SPTP XHOME WITH $VEL_AXIS[1] = SVEL_JOINT(100.0), $TOOL = STOOL2(FHOME), $BASE = SBASE(FHOME.BASE_NO), $IPO_MODE = SIPO_MODE(FHOME.IPO_FRAME), $LOAD = SLOAD(FHOME.TOOL_NO), $ACC_AXIS[1] = SACC_JOINT(PDEFAULT), $APO = SAPO_PTP(PDEFAULT), $GEAR_JERK[1] = SGEAR_JERK(PDEFAULT), $COLLMON_TOL_PRO[1] = USE_CM_PRO_VALUES(0)
+  ;ENDFOLD
+
+  ; ---------- 1. 坐标系与动力学 ----------
+  $ACT_BASE = 1
+  $BASE = BASE_DATA[1]
+  $ACT_TOOL = 1
+  $TOOL = TOOL_DATA[1]
+  $IPO_MODE = #BASE
+
+  $VEL.CP = 0.10
+  $ACC.CP = 0.3
+  $VEL.ORI1 = 20
+  $VEL.ORI2 = 20
+  $ACC.ORI1 = 40
+  $ACC.ORI2 = 40
+  $ORI_TYPE = #VAR
+
+  data_collection = FALSE
+
+  ; 基准点（后续 XYZ 仅在 ±20mm 内微调）
+  ; BASE: X1120 Y240 Z-1200 A-170 B0 C0
+
+  ; ---------- 2. 先 PTP 到基准，锁定轴构型 ----------
+  PTP {X 1120.0, Y 240.0, Z -1200.0, A -170.0, B 0.0, C 0.0}
+  WAIT SEC 0.2
+
+  ; ---------- 3. 启动 RSI ----------
+  RSI_Control(TRUE)
+
+  ; ---------- 4. 12 个分散姿态（位置±20mm，姿态大幅变化） ----------
+  ; 原则：
+  ; - XYZ 仅小幅偏移，避免工作空间冲突
+  ; - A/B/C 尽量拉开，让重力在传感器系方向变化更大
+  ; - A 最大只到 0°，其后只朝负向（-45/-135），避免管线包正向拧死
+  ; - A 从 -170 到 0 分步；回程经 -90 回 -170
+  ; - 每点 RECORD_SAMPLE: TRUE 0.55s -> FALSE
+
+  ; 姿态 1：基准
+  LIN {X 1120.0, Y 240.0, Z -1200.0, A -170.0, B 0.0, C 0.0}
+  RECORD_SAMPLE()
+
+  ; 姿态 2：B+
+  LIN {X 1135.0, Y 240.0, Z -1200.0, A -170.0, B 45.0, C 0.0}
+  RECORD_SAMPLE()
+
+  ; 姿态 3：B-
+  LIN {X 1105.0, Y 240.0, Z -1200.0, A -170.0, B -45.0, C 0.0}
+  RECORD_SAMPLE()
+
+  ; 姿态 4：C+
+  LIN {X 1120.0, Y 255.0, Z -1200.0, A -170.0, B 0.0, C 45.0}
+  RECORD_SAMPLE()
+
+  ; 姿态 5：C-
+  LIN {X 1120.0, Y 225.0, Z -1200.0, A -170.0, B 0.0, C -45.0}
+  RECORD_SAMPLE()
+
+  ; 姿态 6：B+/C+ 组合
+  LIN {X 1130.0, Y 250.0, Z -1190.0, A -170.0, B 35.0, C 35.0}
+  RECORD_SAMPLE()
+
+  ; 姿态 7：B+/C- 组合
+  LIN {X 1130.0, Y 230.0, Z -1210.0, A -170.0, B 35.0, C -35.0}
+  RECORD_SAMPLE()
+
+  ; 姿态 8：B-/C+ 组合
+  LIN {X 1110.0, Y 250.0, Z -1190.0, A -170.0, B -35.0, C 35.0}
+  RECORD_SAMPLE()
+
+  ; 姿态 9：A 过渡（-90），再采
+  LIN {X 1120.0, Y 240.0, Z -1200.0, A -90.0, B 0.0, C 0.0}
+  RECORD_SAMPLE()
+
+  ; 姿态 10：A≈0，配合 B（A 正向到此为止，后续只朝负向）
+  LIN {X 1120.0, Y 245.0, Z -1195.0, A 0.0, B 30.0, C 0.0}
+  RECORD_SAMPLE()
+
+  ; 姿态 11：A 负向 -45，B 必须 -15（管线包安全），配合 C
+  LIN {X 1120.0, Y 235.0, Z -1205.0, A -45.0, B -15.0, C 30.0}
+  RECORD_SAMPLE()
+
+  ; 姿态 12：A 继续负向 -135，三轴组合
+  LIN {X 1125.0, Y 245.0, Z -1195.0, A -135.0, B -25.0, C -25.0}
+  RECORD_SAMPLE()
+
+  ; ---------- 5. 回基准、关 RSI、回 HOME ----------
+  ; 从负向 A 经 -90 回到 -170
+  LIN {X 1120.0, Y 240.0, Z -1200.0, A -90.0, B 0.0, C 0.0}
+  LIN {X 1120.0, Y 240.0, Z -1200.0, A -170.0, B 0.0, C 0.0}
+
+  RSI_Control(FALSE)
+
+  PTP {X 1120.0, Y 240.0, Z -1200.0, A -170.0, B 0.0, C 0.0}
+
+  ;FOLD SPTP HOME Vel=100 % DEFAULT ;%{PE}
+  ;FOLD Parameters ;%{h}
+  ;Params IlfProvider=kukaroboter.basistech.inlineforms.movement.spline; Kuka.IsGlobalPoint=False; Kuka.PointName=HOME; Kuka.BlendingEnabled=False; Kuka.MoveDataPtpName=DEFAULT; Kuka.VelocityPtp=100; Kuka.VelocityFieldEnabled=True; Kuka.CurrentCDSetIndex=0; Kuka.MovementParameterFieldEnabled=True; IlfCommand=SPTP
+  ;ENDFOLD
+  SPTP XHOME WITH $VEL_AXIS[1] = SVEL_JOINT(100.0), $TOOL = STOOL2(FHOME), $BASE = SBASE(FHOME.BASE_NO), $IPO_MODE = SIPO_MODE(FHOME.IPO_FRAME), $LOAD = SLOAD(FHOME.TOOL_NO), $ACC_AXIS[1] = SACC_JOINT(PDEFAULT), $APO = SAPO_PTP(PDEFAULT), $GEAR_JERK[1] = SGEAR_JERK(PDEFAULT), $COLLMON_TOL_PRO[1] = USE_CM_PRO_VALUES(0)
+  ;ENDFOLD
+
+END
+
+; ---------- 样本采集：TRUE 0.5s -> FALSE ----------
+DEF RECORD_SAMPLE ( )
+  WAIT SEC 0.15
+  data_collection = TRUE
+  WAIT SEC 0.55
+  data_collection = FALSE
+  WAIT SEC 0.15
+END

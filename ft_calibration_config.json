@@ -20,14 +20,14 @@
   },
   "static_detection": {
     "window_size": 50,
-    "min_dwell_seconds": 0.8,
+    "min_dwell_seconds": 0.4,
     "position_threshold_m": 0.0008,
     "angle_threshold_deg": 0.25,
     "force_std_threshold_n": 1.5,
     "torque_std_threshold_nm": 0.08,
     "min_pose_separation_deg": 12.0,
     "min_samples": 12,
-    "max_samples": 20
+    "max_samples": 12
   },
   "files": {
     "calibration_path": "ft_calibration.json",
