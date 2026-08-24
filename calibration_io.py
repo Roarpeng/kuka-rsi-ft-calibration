@@ -99,6 +99,7 @@ def load_calibration_result(path: str | Path) -> CalibrationResult | None:
         sensor_to_tcp_translation_m=list(payload["sensor_to_tcp_translation_m"]),
         rsi_rotation_order=payload["rsi_rotation_order"],
         gravity_mps2=float(payload["gravity_mps2"]),
+        gravity_matrix_n=([list(row) for row in payload["gravity_matrix_n"]] if payload.get("gravity_matrix_n") else None),
         notes=list(payload.get("notes", [])),
     )
 

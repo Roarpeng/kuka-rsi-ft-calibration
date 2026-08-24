@@ -19,7 +19,7 @@
 ## 快速开始
 
 ```bash
-# 标定模式：采集 6–12 个分散静止姿态后自动求解
+# 标定模式：FT_Calibration.src 自动走 16 个分散静止姿态后自动求解
 python3 udp_server.py --calibrate
 
 # 运行模式：加载标定结果做实时补偿

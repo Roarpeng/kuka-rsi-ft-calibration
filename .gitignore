@@ -9,6 +9,9 @@ venv/
 *.csv
 ft_calibration.json
 ft_calibration_samples.json
+ft_calibration_fixed.json
+pktmon_*.txt
+_pktmon_cap.txt
 
 # Tooling / IDE
 .claude/

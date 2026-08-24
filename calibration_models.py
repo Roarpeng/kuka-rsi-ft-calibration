@@ -90,4 +90,5 @@ class CalibrationResult:
     sensor_to_tcp_translation_m: Vector3
     rsi_rotation_order: str
     gravity_mps2: float
+    gravity_matrix_n: Optional[Matrix3] = None
     notes: list[str] = field(default_factory=list)
