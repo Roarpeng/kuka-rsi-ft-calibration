@@ -5,7 +5,7 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
-from calibration_models import CalibrationConfig, CalibrationResult, CalibrationSample, CalibrationFileConfig, EulerTransform, ScaleCalibration, StaticDetectionConfig
+from calibration_models import CalibrationConfig, CalibrationResult, CalibrationSample, CalibrationFileConfig, EulerTransform, ForceControlConfig, ScaleCalibration, StaticDetectionConfig
 
 
 DEFAULT_CONFIG_PATH = Path("ft_calibration_config.json")
@@ -59,6 +59,28 @@ def _parse_files(payload: dict[str, Any]) -> CalibrationFileConfig:
     )
 
 
+def _parse_force_control(payload: dict[str, Any]) -> ForceControlConfig:
+    defaults = ForceControlConfig()
+    return ForceControlConfig(
+        axis=str(payload.get("axis", defaults.axis)),
+        press_sign=int(payload.get("press_sign", defaults.press_sign)),
+        default_target_force_n=float(payload.get("default_target_force_n", defaults.default_target_force_n)),
+        kp_mm_per_s_per_n=float(payload.get("kp_mm_per_s_per_n", defaults.kp_mm_per_s_per_n)),
+        ki_mm_per_s2_per_n=float(payload.get("ki_mm_per_s2_per_n", defaults.ki_mm_per_s2_per_n)),
+        integral_limit_n_s=float(payload.get("integral_limit_n_s", defaults.integral_limit_n_s)),
+        per_cycle_max_mm=float(payload.get("per_cycle_max_mm", defaults.per_cycle_max_mm)),
+        cumulative_max_mm=float(payload.get("cumulative_max_mm", defaults.cumulative_max_mm)),
+        deadband_n=float(payload.get("deadband_n", defaults.deadband_n)),
+        contact_threshold_n=float(payload.get("contact_threshold_n", defaults.contact_threshold_n)),
+        search_speed_mm_s=float(payload.get("search_speed_mm_s", defaults.search_speed_mm_s)),
+        search_before_contact=bool(payload.get("search_before_contact", defaults.search_before_contact)),
+        advance_speed_mm_s=float(payload.get("advance_speed_mm_s", defaults.advance_speed_mm_s)),
+        filter_window=int(payload.get("filter_window", defaults.filter_window)),
+        max_force_n=float(payload.get("max_force_n", defaults.max_force_n)),
+        cycle_s=float(payload.get("cycle_s", defaults.cycle_s)),
+    )
+
+
 def load_config(path: str | Path = DEFAULT_CONFIG_PATH) -> CalibrationConfig:
     config_path = Path(path)
     if not config_path.exists():
@@ -72,6 +94,7 @@ def load_config(path: str | Path = DEFAULT_CONFIG_PATH) -> CalibrationConfig:
         flange_to_tcp=_parse_transform(payload.get("flange_to_tcp", {})),
         scale=_parse_scale(payload.get("scale", {})),
         static_detection=_parse_static_detection(payload.get("static_detection", {})),
+        force_control=_parse_force_control(payload.get("force_control", {})),
         files=_parse_files(payload.get("files", {})),
     )
 

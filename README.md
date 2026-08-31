@@ -25,6 +25,10 @@ python3 udp_server.py --calibrate
 # 运行模式：加载标定结果做实时补偿
 python3 udp_server.py --run
 
+# 力控模式（恒力钻孔）：补偿 + 恒力控制，RKorr 输出位置修正
+# 机器人侧运行 FT_Drilling.src；目标力由全局变量 target_force 在线设置
+python3 udp_server.py --force
+
 # 仅记录模式（默认）；若已有标定文件则自动启用补偿
 python3 udp_server.py
 
@@ -39,6 +43,8 @@ python3 udp_server.py --calibrate --ip 192.168.2.10 --port 59152
 | `udp_server.py` | UDP 主程序：接收、解析、CSV、模式入口 |
 | `calibration_runner.py` | 采样触发、均值样本、求解、运行时补偿 |
 | `calibration_math.py` | 旋转/变换、重力模型拟合、补偿计算 |
+| `force_controller.py` | 恒力控制：力误差 -> 单轴位置修正（RKorr），支持打磨/钻孔两种接触策略 |
+| `FT_Drilling.src/.dat` | 恒力钻孔程序模板（含 target_force 全局变量） |
 | `calibration_models.py` | 配置与数据结构 |
 | `calibration_io.py` | 配置/结果/样本读写 |
 | `ft_calibration_config.json` | 标定与外参配置 |

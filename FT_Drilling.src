@@ -1,0 +1,69 @@
+&ACCESS RVP
+&REL 1
+&COMMENT Constant-Force Drilling - Tool X thrust, feed along drill axis
+DEF FT_Drilling ( )
+  ;FOLD INI;%{PE}
+    GLOBAL INTERRUPT DECL 3 WHEN $STOPMESS==TRUE DO IR_STOPM ( )
+    INTERRUPT ON 3
+    BAS (#INITMOV, 0)
+  ;ENDFOLD (BASISTECH INI)
+
+  ;FOLD SPTP HOME Vel=100 % DEFAULT ;%{PE}
+  ;FOLD Parameters ;%{h}
+  ;Params IlfProvider=kukaroboter.basistech.inlineforms.movement.spline; Kuka.IsGlobalPoint=False; Kuka.PointName=HOME; Kuka.BlendingEnabled=False; Kuka.MoveDataPtpName=DEFAULT; Kuka.VelocityPtp=100; Kuka.VelocityFieldEnabled=True; Kuka.CurrentCDSetIndex=0; Kuka.MovementParameterFieldEnabled=True; IlfCommand=SPTP
+  ;ENDFOLD
+  SPTP XHOME WITH $VEL_AXIS[1] = SVEL_JOINT(100.0), $TOOL = STOOL2(FHOME), $BASE = SBASE(FHOME.BASE_NO), $IPO_MODE = SIPO_MODE(FHOME.IPO_FRAME), $LOAD = SLOAD(FHOME.TOOL_NO), $ACC_AXIS[1] = SACC_JOINT(PDEFAULT), $APO = SAPO_PTP(PDEFAULT), $GEAR_JERK[1] = SGEAR_JERK(PDEFAULT), $COLLMON_TOL_PRO[1] = USE_CM_PRO_VALUES(0)
+  ;ENDFOLD
+
+  ; ---------- 1. 坐标系与速度 ----------
+  $ACT_BASE = 1
+  $BASE = BASE_DATA[1]
+  $ACT_TOOL = 1
+  $TOOL = TOOL_DATA[1]
+  $IPO_MODE = #BASE
+
+  ; 编程进给速度：名义进给 0.01 m/s，实际推进由力控按 target_force 调节
+  ; 接触前接触后方向不变：钻孔 = 沿钻进方向恒力
+  $VEL.CP = 0.01
+  $ACC.CP = 0.1
+  $VEL.ORI1 = 10
+  $VEL.ORI2 = 10
+  $ACC.ORI1 = 20
+  $ACC.ORI2 = 20
+  $ORI_TYPE = #VAR
+  $APO.CDIS = 0.5
+
+  data_collection = FALSE
+
+  ; ---------- 2. 接近工件 ----------
+  ; 钻进方向 = TOOL +X。在 A-170/B0/C0 姿态下 TOOL X 约等于 -BASE X，
+  ; 因此路径沿 BASE X 负方向（X 由大变小）。
+  ; 起点应贴近工件表面（留 1~2mm 间隙），起止点按现场示教修改
+  PTP {X 1120.0, Y 240.0, Z -1200.0, A -170.0, B 0.0, C 0.0}
+  WAIT SEC 0.2
+
+  ; ---------- 3. 启动 RSI（上位机须已运行: python udp_server.py --force） ----------
+  RSI_Control(TRUE)
+
+  ; ---------- 4. 钻孔进给（沿 -BASE X，行程按孔深+余量示教） ----------
+  ; 力控逻辑：接触前零修正（路径自行逼近）；接触后把 TOOL X 推进力
+  ; 稳定到 target_force；钻穿后力消失，修正自动停止不前冲。
+  ; 实际钻深 = 编程行程 + 累积修正；累积限幅见配置 cumulative_max_mm
+  LIN {X 1120.0, Y 240.0, Z -1200.0, A -170.0, B 0.0, C 0.0}
+  LIN {X 1060.0, Y 240.0, Z -1200.0, A -170.0, B 0.0, C 0.0}
+
+  ; ---------- 5. 关 RSI、退刀、回 HOME ----------
+  RSI_Control(FALSE)
+
+  ; 退刀：沿 +BASE X 退回。注意 RSI 修正已叠加在实际位置里，
+  ; 该 LIN 目标点按编程坐标，实际从当前真实位置退回
+  LIN {X 1120.0, Y 240.0, Z -1200.0, A -170.0, B 0.0, C 0.0}
+
+  ;FOLD SPTP HOME Vel=100 % DEFAULT ;%{PE}
+  ;FOLD Parameters ;%{h}
+  ;Params IlfProvider=kukaroboter.basistech.inlineforms.movement.spline; Kuka.IsGlobalPoint=False; Kuka.PointName=HOME; Kuka.BlendingEnabled=False; Kuka.MoveDataPtpName=DEFAULT; Kuka.VelocityPtp=100; Kuka.VelocityFieldEnabled=True; Kuka.CurrentCDSetIndex=0; Kuka.MovementParameterFieldEnabled=True; IlfCommand=SPTP
+  ;ENDFOLD
+  SPTP XHOME WITH $VEL_AXIS[1] = SVEL_JOINT(100.0), $TOOL = STOOL2(FHOME), $BASE = SBASE(FHOME.BASE_NO), $IPO_MODE = SIPO_MODE(FHOME.IPO_FRAME), $LOAD = SLOAD(FHOME.TOOL_NO), $ACC_AXIS[1] = SACC_JOINT(PDEFAULT), $APO = SAPO_PTP(PDEFAULT), $GEAR_JERK[1] = SGEAR_JERK(PDEFAULT), $COLLMON_TOL_PRO[1] = USE_CM_PRO_VALUES(0)
+  ;ENDFOLD
+
+END

@@ -1,0 +1,10 @@
+&ACCESS RVP
+&REL 1
+&COMMENT Constant-Force Drilling - global vars for RSI
+DEFDAT FT_Drilling PUBLIC
+
+  ; 钻孔目标推进力（N）。RSI XML 的 Send 段加同名元素后，上位机每周期读取；
+  ; 示教器上改这个变量即可在线调整目标力。<= 0 时上位机不输出修正。
+  DECL GLOBAL REAL target_force = 50.0
+
+ENDDAT

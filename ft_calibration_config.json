@@ -29,6 +29,24 @@
     "min_samples": 16,
     "max_samples": 16
   },
+  "force_control": {
+    "axis": "X",
+    "press_sign": -1,
+    "default_target_force_n": 50.0,
+    "kp_mm_per_s_per_n": 0.3,
+    "ki_mm_per_s2_per_n": 0.8,
+    "integral_limit_n_s": 80.0,
+    "per_cycle_max_mm": 0.2,
+    "cumulative_max_mm": 80.0,
+    "deadband_n": 1.0,
+    "contact_threshold_n": 3.0,
+    "search_speed_mm_s": 4.0,
+    "search_before_contact": false,
+    "advance_speed_mm_s": 4.0,
+    "filter_window": 4,
+    "max_force_n": 150.0,
+    "cycle_s": 0.004
+  },
   "files": {
     "calibration_path": "ft_calibration.json",
     "sample_path": "ft_calibration_samples.json"

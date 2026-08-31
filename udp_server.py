@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Optional
 from calibration_io import load_calibration_result, load_config
 from calibration_models import CalibratedWrench
 from calibration_runner import CalibrationRunner
+from force_controller import ForceController
 
 if TYPE_CHECKING:
     from calibration_models import CalibrationConfig
@@ -64,6 +65,7 @@ class RSIData:
     iPOC: int = 0
     ipoc_text: str = "0"
     data_collection: bool = False  # 标定采样触发：true 采集，false 不采集
+    target_force: float = 0.0      # 力控目标力（KUKA 全局变量，0=未提供时用配置默认值）
     sensor_fx: float = 0.0
     sensor_fy: float = 0.0
     sensor_fz: float = 0.0
@@ -133,6 +135,7 @@ class RSIServer:
         ("Act_B", "DOUBLE", 11),
         ("Act_C", "DOUBLE", 12),
         ("data_collection", "BOOL", 13),
+        ("target_force", "DOUBLE", 14),  # 可选：机器人力控目标力（N），RSI XML 里加同名元素
     ]
 
     # 对应机器人 RSI XML 的 RECEIVE/ELEMENTS（上位机 -> 机器人）
@@ -152,6 +155,7 @@ class RSIServer:
         "sensor_Fx_N", "sensor_Fy_N", "sensor_Fz_N", "sensor_Mx_Nm", "sensor_My_Nm", "sensor_Mz_Nm",
         "tcp_Fx_N", "tcp_Fy_N", "tcp_Fz_N", "tcp_Mx_Nm", "tcp_My_Nm", "tcp_Mz_Nm",
         "sample_status",
+        "target_force_N", "rkorr_x_mm", "rkorr_y_mm", "rkorr_z_mm",
     ]
 
     def __init__(self, config: Optional[RSIConfig] = None, csv_filename: str = "rsi_data.csv"):
@@ -165,6 +169,8 @@ class RSIServer:
 
         self.calibration_config: Optional[CalibrationConfig] = None
         self.calibration_runner: Optional[CalibrationRunner] = None
+        self.force_controller: Optional[ForceController] = None
+        self.force_mode = False
         self.tx_count = 0
         self.rx_count = 0
         self.parse_ok_count = 0
@@ -275,7 +281,10 @@ class RSIServer:
         scalar_tags: list[tuple[str, str]] = []
 
         for tag, _, _ in self.RECEIVE_ELEMENTS:
-            if self.config.reply_zeros:
+            if self.force_mode:
+                # 力控模式：RKorr 由 ForceController 逐周期写入 config.rkorr
+                value = self.config.rkorr.get(tag, 0.0)
+            elif self.config.reply_zeros:
                 value = 0.0
             else:
                 value = random.uniform(self.config.rkorr_min, self.config.rkorr_max)
@@ -353,6 +362,8 @@ class RSIServer:
                 rsi_data.tcp_fx, rsi_data.tcp_fy, rsi_data.tcp_fz,
                 rsi_data.tcp_mx, rsi_data.tcp_my, rsi_data.tcp_mz,
                 rsi_data.sample_status,
+                rsi_data.target_force,
+                self.config.rkorr["RKorr.X"], self.config.rkorr["RKorr.Y"], self.config.rkorr["RKorr.Z"],
             ]
             self.csv_writer.writerow(row)
             if self.csv_file is not None:
@@ -365,6 +376,19 @@ class RSIServer:
         self.sock.sendto(response_xml.encode("utf-8"), address)
         self.tx_count += 1
         return response_xml
+
+    def _update_force_reply(self, rsi_data: RSIData):
+        """力控模式：根据补偿后的 TCP 力计算 RKorr，写入 config.rkorr 供本周期回包。"""
+        assert self.force_controller is not None
+        assert self.calibration_config is not None
+        fc_cfg = self.calibration_config.force_control
+        target = rsi_data.target_force if rsi_data.target_force > 0.0 else fc_cfg.default_target_force_n
+        rkorr = self.force_controller.update(
+            force_tcp=[rsi_data.tcp_fx, rsi_data.tcp_fy, rsi_data.tcp_fz],
+            tcp_angles_deg=[rsi_data.Act_A, rsi_data.Act_B, rsi_data.Act_C],
+            target_force_n=target,
+        )
+        self.config.rkorr.update(rkorr)
 
     def self_test_xml(self) -> bool:
         """不依赖机器人，校验解析与回包格式。"""
@@ -545,11 +569,16 @@ class RSIServer:
                     rsi_data = self.parse_rsi_xml(data)
 
                     if rsi_data:
-                        # RSI 4ms 周期：先回传同一 IPOC，再做标定/写盘
-                        response_xml = self._reply(rsi_data, address)
-
                         packet_count += 1
-                        rsi_data = self.process_frame(rsi_data)
+                        if self.force_mode and self.force_controller is not None:
+                            # 力控模式：先用当前帧算 RKorr，再回包（同一 IPOC）
+                            rsi_data = self.process_frame(rsi_data)
+                            self._update_force_reply(rsi_data)
+                            response_xml = self._reply(rsi_data, address)
+                        else:
+                            # RSI 4ms 周期：先回传同一 IPOC，再做标定/写盘
+                            response_xml = self._reply(rsi_data, address)
+                            rsi_data = self.process_frame(rsi_data)
 
                         if packet_count == 1:
                             print(f"  原文: {data.decode('utf-8', errors='replace')[:500]}")
@@ -575,6 +604,9 @@ class RSIServer:
                                 )
                             )
                             print(f"  状态={rsi_data.sample_status}")
+                            if self.force_mode and self.force_controller is not None:
+                                print(f"  目标力={rsi_data.target_force if rsi_data.target_force > 0 else self.calibration_config.force_control.default_target_force_n:.1f} N  "
+                                      f"{self.force_controller.status_line}")
 
                         self.save_to_csv(rsi_data)
                         self.rsi_data_list.append(rsi_data)
@@ -623,6 +655,11 @@ def create_parser() -> argparse.ArgumentParser:
         "--run",
         action="store_true",
         help="启动运行模式：使用已有标定结果进行实时重力补偿"
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="启动力控模式：重力补偿 + 恒力控制，RKorr 输出单轴位置修正（需已完成标定）"
     )
     parser.add_argument(
         "--ip",
@@ -697,6 +734,15 @@ def main():
         print("=== 运行模式 ===")
         print("使用已有标定结果进行实时重力补偿")
         print("RSI 回包：RKorr 全 0（收包即回，维持双向闭环）\n")
+    elif args.force:
+        calibration_config.mode = "calibrated_runtime"
+        fc = calibration_config.force_control
+        print("=== 力控模式（恒力打磨） ===")
+        print(f"压紧轴：TOOL {fc.axis}（press_sign={fc.press_sign}）")
+        print(f"目标力：{fc.default_target_force_n} N（机器人 target_force 变量可在线修改）")
+        print(f"增益：Kp={fc.kp_mm_per_s_per_n} (mm/s)/N, Ki={fc.ki_mm_per_s2_per_n} (mm/s²)/N")
+        print(f"限幅：每周期 ±{fc.per_cycle_max_mm} mm，累积 ±{fc.cumulative_max_mm} mm，超力保护 {fc.max_force_n} N")
+        print("RSI 回包：RKorr = 力控制器输出（先算后回，同一 IPOC）\n")
     else:
         calibration_config.mode = "record_only"
         print("=== 仅记录模式 ===")
@@ -713,6 +759,16 @@ def main():
         if calibration_config.mode == "record_only":
             calibration_config.mode = "calibrated_runtime"
             print("检测到已有标定结果，自动启用补偿")
+
+    if args.force:
+        if calibration_result is None:
+            print("错误：力控模式需要已有标定结果（ft_calibration.json），请先运行 --calibrate 完成标定")
+            sys.exit(1)
+        server.force_controller = ForceController(
+            calibration_config.force_control,
+            rsi_rotation_order=calibration_config.rsi_rotation_order,
+        )
+        server.force_mode = True
 
     server.run()
 
