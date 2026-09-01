@@ -44,6 +44,7 @@ class RSIConfig:
             "RKorr.C": 0.0,
         }
     )
+    ov_pro: float = 100.0  # 回发 $OV_PRO（0–100%），Map2OV_PRO 输入范围须一致
 
 
 @dataclass
@@ -65,7 +66,9 @@ class RSIData:
     iPOC: int = 0
     ipoc_text: str = "0"
     data_collection: bool = False  # 标定采样触发：true 采集，false 不采集
-    target_force: float = 0.0      # 力控目标力（KUKA 全局变量，0=未提供时用配置默认值）
+    RobotStatus: bool = False      # FALSE=钻孔（控 $OV_PRO）；TRUE=凿击（位移后续再做）
+    target_force: float = 0.0      # 力控目标力（可选 XML；未带则用配置默认值）
+    target_force_present: bool = False  # RSI XML 是否带了 <target_force>；未带则用配置默认值
     sensor_fx: float = 0.0
     sensor_fy: float = 0.0
     sensor_fz: float = 0.0
@@ -112,6 +115,7 @@ SAMPLE_ROB_XML = (
     "<Act_X>903.0</Act_X><Act_Y>-80.5</Act_Y><Act_Z>1213.1</Act_Z>"
     "<Act_A>-83.7</Act_A><Act_B>0.8</Act_B><Act_C>179.8</Act_C>"
     "<data_collection>FALSE</data_collection>"
+    "<RobotStatus>FALSE</RobotStatus>"
     "<IPOC>123645634563</IPOC>"
     "</Rob>"
 )
@@ -135,7 +139,7 @@ class RSIServer:
         ("Act_B", "DOUBLE", 11),
         ("Act_C", "DOUBLE", 12),
         ("data_collection", "BOOL", 13),
-        ("target_force", "DOUBLE", 14),  # 可选：机器人力控目标力（N），RSI XML 里加同名元素
+        ("RobotStatus", "BOOL", 14),  # FALSE=钻孔控倍率；TRUE=凿击（位移后续）
     ]
 
     # 对应机器人 RSI XML 的 RECEIVE/ELEMENTS（上位机 -> 机器人）
@@ -146,6 +150,7 @@ class RSIServer:
         ("RKorr.A", "DOUBLE", 4),
         ("RKorr.B", "DOUBLE", 5),
         ("RKorr.C", "DOUBLE", 6),
+        ("OV_PRO", "DOUBLE", 7),  # Ethernet Out7 → Map2OV_PRO；量纲 0–100%，不是 mm/s
     ]
 
     CSV_HEADER = [
@@ -156,6 +161,8 @@ class RSIServer:
         "tcp_Fx_N", "tcp_Fy_N", "tcp_Fz_N", "tcp_Mx_Nm", "tcp_My_Nm", "tcp_Mz_Nm",
         "sample_status",
         "target_force_N", "rkorr_x_mm", "rkorr_y_mm", "rkorr_z_mm",
+        "corr_cum_x_mm", "corr_cum_y_mm", "corr_cum_z_mm",
+        "RobotStatus", "ov_pro_pct",
     ]
 
     def __init__(self, config: Optional[RSIConfig] = None, csv_filename: str = "rsi_data.csv"):
@@ -174,6 +181,7 @@ class RSIServer:
         self.tx_count = 0
         self.rx_count = 0
         self.parse_ok_count = 0
+        self._warned_missing_target = False
 
     def start(self, enable_csv: bool = True):
         """启动 UDP 服务器"""
@@ -250,16 +258,20 @@ class RSIServer:
                 elem = root.find(f".//{tag}")
                 if elem is not None and elem.text:
                     value = elem.text.strip()
-                    if elem_type == "LONG":
+                    if elem_type in ("LONG", "INT"):
                         setattr(rsi_data, tag, int(value))
                     elif elem_type == "DOUBLE":
                         setattr(rsi_data, tag, float(value))
                     elif elem_type == "BOOL":
-                        # KUKA 常见：1/0、TRUE/FALSE；缺省或空文本视为 False
                         setattr(rsi_data, tag, value.upper() in ("1", "TRUE", "YES", "ON"))
-                elif elem_type == "BOOL" and tag == "data_collection":
-                    # 标签存在但无文本时保持 False
+                elif elem_type == "BOOL":
                     setattr(rsi_data, tag, False)
+
+            # 可选：XML 另加 <target_force> 时可在线改目标力；当前机器人 SEND 无此标签
+            tf_elem = root.find(".//target_force")
+            if tf_elem is not None and tf_elem.text:
+                rsi_data.target_force = float(tf_elem.text.strip())
+                rsi_data.target_force_present = True
 
             return rsi_data
 
@@ -281,14 +293,18 @@ class RSIServer:
         scalar_tags: list[tuple[str, str]] = []
 
         for tag, _, _ in self.RECEIVE_ELEMENTS:
-            if self.force_mode:
-                # 力控模式：RKorr 由 ForceController 逐周期写入 config.rkorr
-                value = self.config.rkorr.get(tag, 0.0)
-            elif self.config.reply_zeros:
-                value = 0.0
+            if tag.startswith("RKorr."):
+                if self.force_mode:
+                    value = self.config.rkorr.get(tag, 0.0)
+                elif self.config.reply_zeros:
+                    value = 0.0
+                else:
+                    value = random.uniform(self.config.rkorr_min, self.config.rkorr_max)
+                self.config.rkorr[tag] = value
+            elif tag == "OV_PRO":
+                value = self.config.ov_pro
             else:
-                value = random.uniform(self.config.rkorr_min, self.config.rkorr_max)
-            self.config.rkorr[tag] = value
+                value = 0.0
             text = f"{value:.4f}"
             if "." in tag:
                 elem, attr = tag.split(".", 1)
@@ -364,6 +380,13 @@ class RSIServer:
                 rsi_data.sample_status,
                 rsi_data.target_force,
                 self.config.rkorr["RKorr.X"], self.config.rkorr["RKorr.Y"], self.config.rkorr["RKorr.Z"],
+                *(
+                    self.force_controller.corr_cumulative_mm
+                    if self.force_controller is not None
+                    else [0.0, 0.0, 0.0]
+                ),
+                1 if rsi_data.RobotStatus else 0,
+                self.config.ov_pro,
             ]
             self.csv_writer.writerow(row)
             if self.csv_file is not None:
@@ -382,13 +405,26 @@ class RSIServer:
         assert self.force_controller is not None
         assert self.calibration_config is not None
         fc_cfg = self.calibration_config.force_control
-        target = rsi_data.target_force if rsi_data.target_force > 0.0 else fc_cfg.default_target_force_n
+        if rsi_data.target_force_present:
+            # 机器人显式下发（含 0）：0 = 关 RSI 前撤除修正；未下发则用默认 50N
+            target = rsi_data.target_force
+        else:
+            target = fc_cfg.default_target_force_n
+            if not self._warned_missing_target:
+                print(
+                    f"[力控] RSI 包未含 target_force，使用默认 {target:.1f} N。"
+                    "若要在示教器在线改目标力，请在 RSI XML SEND 加入同名元素。"
+                )
+                self._warned_missing_target = True
         rkorr = self.force_controller.update(
             force_tcp=[rsi_data.tcp_fx, rsi_data.tcp_fy, rsi_data.tcp_fz],
             tcp_angles_deg=[rsi_data.Act_A, rsi_data.Act_B, rsi_data.Act_C],
             target_force_n=target,
+            tcp_position_mm=[rsi_data.Act_X, rsi_data.Act_Y, rsi_data.Act_Z],
+            mode="chisel" if rsi_data.RobotStatus else "drill",
         )
         self.config.rkorr.update(rkorr)
+        self.config.ov_pro = self.force_controller.ov_pro_pct
 
     def self_test_xml(self) -> bool:
         """不依赖机器人，校验解析与回包格式。"""
@@ -397,25 +433,27 @@ class RSIServer:
             print("[自检失败] 无法解析示例 SEND XML")
             return False
         reply = self.generate_response(parsed)
-        tags = [tag for tag, _, _ in self.RECEIVE_ELEMENTS]
+        rkorr_tags = [tag for tag, _, _ in self.RECEIVE_ELEMENTS if tag.startswith("RKorr.")]
         if self.config.reply_zeros:
-            rkorr_ok = all(self.config.rkorr[tag] == 0.0 for tag in tags)
+            rkorr_ok = all(self.config.rkorr[tag] == 0.0 for tag in rkorr_tags)
             rkorr_text_ok = 'X="0.0000"' in reply and 'C="0.0000"' in reply
         else:
             rkorr_ok = all(
                 self.config.rkorr_min <= self.config.rkorr[tag] <= self.config.rkorr_max
-                for tag in tags
+                for tag in rkorr_tags
             )
             rkorr_text_ok = 'X="' in reply and 'C="' in reply
         ok = (
             parsed.Fx_raw == 100
             and parsed.Act_C == 179.8
             and parsed.ipoc_text == "123645634563"
+            and parsed.RobotStatus is False
             and f'Type="{self.config.SENTYPE}"' in reply
             and "<RKorr " in reply
             and rkorr_text_ok
             and "<RKorr.X>" not in reply
             and rkorr_ok
+            and "<OV_PRO>100.0000</OV_PRO>" in reply
             and "<IPOC>123645634563</IPOC>" in reply
         )
         print("=== XML 自检 ===")
@@ -554,11 +592,26 @@ class RSIServer:
             packet_count = 0
             wait_started = time.monotonic()
             last_wait_print = wait_started
+            last_rx_monotonic: Optional[float] = None
             seen_sources: set[tuple] = set()
 
             while True:
                 try:
                     data, address = self.sock.recvfrom(4096)
+
+                    # #RELATIVE：机器人叠加在 RSI_ON 时从 0 起。收包中断 >1s
+                    # 判定上下文已重建，PC 累积必须同步清零，否则会按旧总偏
+                    # 移继续发增量，把机器人推到错误位置。
+                    now_rx = time.monotonic()
+                    if (
+                        self.force_mode
+                        and self.force_controller is not None
+                        and last_rx_monotonic is not None
+                        and now_rx - last_rx_monotonic > 1.0
+                    ):
+                        self.force_controller.reset()
+                        print("[力控] 收包中断 >1s，判定 RSI 重启，修正累积已清零")
+                    last_rx_monotonic = now_rx
 
                     if address not in seen_sources:
                         seen_sources.add(address)
@@ -592,20 +645,29 @@ class RSIServer:
                             print(f"  Mx_raw={rsi_data.Mx_raw}, My_raw={rsi_data.My_raw}, Mz_raw={rsi_data.Mz_raw}")
                             print(f"  Act_X={rsi_data.Act_X:.3f}, Act_Y={rsi_data.Act_Y:.3f}, Act_Z={rsi_data.Act_Z:.3f}")
                             print(f"  Act_A={rsi_data.Act_A:.3f}, Act_B={rsi_data.Act_B:.3f}, Act_C={rsi_data.Act_C:.3f}")
-                            print(f"  data_collection={rsi_data.data_collection}")
+                            print(
+                                f"  data_collection={rsi_data.data_collection}  "
+                                f"RobotStatus={'凿击' if rsi_data.RobotStatus else '钻孔'}"
+                            )
                             print(f"  Sensor(N/Nm)=({rsi_data.sensor_fx:.3f}, {rsi_data.sensor_fy:.3f}, {rsi_data.sensor_fz:.3f}, {rsi_data.sensor_mx:.3f}, {rsi_data.sensor_my:.3f}, {rsi_data.sensor_mz:.3f})")
                             print(f"  TCP补偿后(N/Nm)=({rsi_data.tcp_fx:.3f}, {rsi_data.tcp_fy:.3f}, {rsi_data.tcp_fz:.3f}, {rsi_data.tcp_mx:.3f}, {rsi_data.tcp_my:.3f}, {rsi_data.tcp_mz:.3f})")
                             rk = self.config.rkorr
-                            print(
-                                "  回发 "
-                                + " ".join(
-                                    f"{tag}={rk[tag]:.4f}"
-                                    for tag, _, _ in self.RECEIVE_ELEMENTS
-                                )
-                            )
+                            parts = []
+                            for tag, _, _ in self.RECEIVE_ELEMENTS:
+                                if tag.startswith("RKorr."):
+                                    parts.append(f"{tag}={rk[tag]:.4f}")
+                                elif tag == "OV_PRO":
+                                    parts.append(f"OV_PRO={self.config.ov_pro:.1f}")
+                            print("  回发 " + " ".join(parts))
                             print(f"  状态={rsi_data.sample_status}")
                             if self.force_mode and self.force_controller is not None:
-                                print(f"  目标力={rsi_data.target_force if rsi_data.target_force > 0 else self.calibration_config.force_control.default_target_force_n:.1f} N  "
+                                if rsi_data.target_force_present:
+                                    tgt_n = rsi_data.target_force
+                                elif self.calibration_config is not None:
+                                    tgt_n = self.calibration_config.force_control.default_target_force_n
+                                else:
+                                    tgt_n = 0.0
+                                print(f"  目标力={tgt_n:.1f} N  "
                                       f"{self.force_controller.status_line}")
 
                         self.save_to_csv(rsi_data)
@@ -659,7 +721,7 @@ def create_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--force",
         action="store_true",
-        help="启动力控模式：重力补偿 + 恒力控制，RKorr 输出单轴位置修正（需已完成标定）"
+        help="启动力控模式：重力补偿 + 恒力钻孔（RobotStatus=FALSE 控 OV_PRO；TRUE 凿击后续）"
     )
     parser.add_argument(
         "--ip",
@@ -739,10 +801,14 @@ def main():
         fc = calibration_config.force_control
         print("=== 力控模式（恒力打磨） ===")
         print(f"压紧轴：TOOL {fc.axis}（press_sign={fc.press_sign}）")
-        print(f"目标力：{fc.default_target_force_n} N（机器人 target_force 变量可在线修改）")
+        print(f"RKorr 坐标系：{fc.rkorr_frame}（须与 PosCorr.RefCorrSys 一致）")
+        print(f"目标力：默认 {fc.default_target_force_n} N（RSI XML 含 target_force 时可在线改）")
         print(f"增益：Kp={fc.kp_mm_per_s_per_n} (mm/s)/N, Ki={fc.ki_mm_per_s2_per_n} (mm/s²)/N")
-        print(f"限幅：每周期 ±{fc.per_cycle_max_mm} mm，累积 ±{fc.cumulative_max_mm} mm，超力保护 {fc.max_force_n} N")
-        print("RSI 回包：RKorr = 力控制器输出（先算后回，同一 IPOC）\n")
+        print(f"力滤波：中值 {fc.filter_median_window} 帧 + 低通 {fc.filter_lpf_hz} Hz")
+        print(f"路径进给补偿：{fc.path_feed_mm_s} mm/s（须与 $VEL.CP 一致）")
+        print(f"限幅：每拍增量 ±{fc.per_cycle_max_mm} mm（PosCorr），累积 ±{fc.cumulative_max_mm} mm（POSCORRMON），超力保护 {fc.max_force_n} N")
+        print(f"倍率：RobotStatus=FALSE 钻孔按力映射 $OV_PRO 0–100%（每拍 ≤{fc.ov_pro_slew_pct:.1f}%）；TRUE 凿击位移尚未启用，回发默认 {fc.default_ov_pro:.0f}%")
+        print("RSI 回包：钻孔 RKorr=0 + OV_PRO（须 RSI_ON(#RELATIVE)；Ethernet Out7→Map2OV_PRO 量程 0–100）\n")
     else:
         calibration_config.mode = "record_only"
         print("=== 仅记录模式 ===")

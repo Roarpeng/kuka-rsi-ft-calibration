@@ -64,6 +64,7 @@ def _parse_force_control(payload: dict[str, Any]) -> ForceControlConfig:
     return ForceControlConfig(
         axis=str(payload.get("axis", defaults.axis)),
         press_sign=int(payload.get("press_sign", defaults.press_sign)),
+        press_motion_sign=int(payload.get("press_motion_sign", defaults.press_motion_sign)),
         default_target_force_n=float(payload.get("default_target_force_n", defaults.default_target_force_n)),
         kp_mm_per_s_per_n=float(payload.get("kp_mm_per_s_per_n", defaults.kp_mm_per_s_per_n)),
         ki_mm_per_s2_per_n=float(payload.get("ki_mm_per_s2_per_n", defaults.ki_mm_per_s2_per_n)),
@@ -75,9 +76,22 @@ def _parse_force_control(payload: dict[str, Any]) -> ForceControlConfig:
         search_speed_mm_s=float(payload.get("search_speed_mm_s", defaults.search_speed_mm_s)),
         search_before_contact=bool(payload.get("search_before_contact", defaults.search_before_contact)),
         advance_speed_mm_s=float(payload.get("advance_speed_mm_s", defaults.advance_speed_mm_s)),
+        path_feed_mm_s=float(payload.get("path_feed_mm_s", defaults.path_feed_mm_s)),
+        path_feed_hold_s=float(payload.get("path_feed_hold_s", defaults.path_feed_hold_s)),
+        contact_lost_s=float(payload.get("contact_lost_s", defaults.contact_lost_s)),
+        trip_clear_s=float(payload.get("trip_clear_s", defaults.trip_clear_s)),
+        rkorr_frame=str(payload.get("rkorr_frame", defaults.rkorr_frame)).lower(),
         filter_window=int(payload.get("filter_window", defaults.filter_window)),
+        filter_median_window=int(payload.get(
+            "filter_median_window",
+            payload.get("filter_window", defaults.filter_median_window),
+        )),
+        filter_protect_window=int(payload.get("filter_protect_window", defaults.filter_protect_window)),
+        filter_lpf_hz=float(payload.get("filter_lpf_hz", defaults.filter_lpf_hz)),
         max_force_n=float(payload.get("max_force_n", defaults.max_force_n)),
         cycle_s=float(payload.get("cycle_s", defaults.cycle_s)),
+        default_ov_pro=float(payload.get("default_ov_pro", defaults.default_ov_pro)),
+        ov_pro_slew_pct=float(payload.get("ov_pro_slew_pct", defaults.ov_pro_slew_pct)),
     )
 
 

@@ -25,8 +25,9 @@ python3 udp_server.py --calibrate
 # 运行模式：加载标定结果做实时补偿
 python3 udp_server.py --run
 
-# 力控模式（恒力钻孔）：补偿 + 恒力控制，RKorr 输出位置修正
-# 机器人侧运行 FT_Drilling.src；目标力由全局变量 target_force 在线设置
+# 力控模式（恒力钻孔）：补偿 + 恒力控制
+# RobotStatus=FALSE 钻孔：回发 OV_PRO 改 $OV_PRO；TRUE 凿击位移后续再做。
+# 机器人侧运行 FT_Drilling.src；RobotStatus 由全局变量下发
 python3 udp_server.py --force
 
 # 仅记录模式（默认）；若已有标定文件则自动启用补偿
@@ -43,8 +44,9 @@ python3 udp_server.py --calibrate --ip 192.168.2.10 --port 59152
 | `udp_server.py` | UDP 主程序：接收、解析、CSV、模式入口 |
 | `calibration_runner.py` | 采样触发、均值样本、求解、运行时补偿 |
 | `calibration_math.py` | 旋转/变换、重力模型拟合、补偿计算 |
-| `force_controller.py` | 恒力控制：力误差 -> 单轴位置修正（RKorr），支持打磨/钻孔两种接触策略 |
-| `FT_Drilling.src/.dat` | 恒力钻孔程序模板（含 target_force 全局变量） |
+| `force_controller.py` | 恒力控制：钻孔用 `$OV_PRO` 控进给；凿击位移尚未启用 |
+| `FT_Drilling.src/.dat` | 恒力钻孔程序（`RobotStatus`、`target_force` 全局变量） |
+| `RSIEthernet.snippet.xml` | 与现场一致的 SEND `RobotStatus` / RECEIVE `OV_PRO` 片段 |
 | `calibration_models.py` | 配置与数据结构 |
 | `calibration_io.py` | 配置/结果/样本读写 |
 | `ft_calibration_config.json` | 标定与外参配置 |
@@ -91,6 +93,14 @@ python3 udp_server.py --calibrate --ip 192.168.2.10 --port 59152
 | 7–9 | Act_X ~ Act_Z | DOUBLE | TCP 位置 (mm) |
 | 10–12 | Act_A ~ Act_C | DOUBLE | TCP 姿态 (deg) |
 | 13 | data_collection | BOOL | 标定采样触发 |
+| 14 | RobotStatus | BOOL | FALSE=钻孔（控倍率）；TRUE=凿击（位移后续） |
+
+RECEIVE（上位机 → 机器人）：
+
+| 序号 | 字段 | 类型 | 说明 |
+|------|------|------|------|
+| 1–6 | RKorr.X ~ C | DOUBLE | 位置修正（#RELATIVE 每拍增量）；HOLDON=0 |
+| 7 | OV_PRO | DOUBLE | `$OV_PRO` 0–100%，Ethernet Out7 → Map2OV_PRO |
 
 ### data_collection 信号
 
@@ -107,11 +117,41 @@ python3 udp_server.py --calibrate --ip 192.168.2.10 --port 59152
 
 建议每姿态保持 TRUE 约 0.5s；过短（默认 < 0.4s）的段会被丢弃。
 
+### RobotStatus 与 $OV_PRO
+
+`Map2OV_PRO` 改的是程序倍率（0–100%），不是 mm/s。实际路径速度 = `$VEL.CP × OV_PRO/100`。
+
+- `RobotStatus = FALSE`（钻孔）：按接触力映射倍率（空载接近 100%；到目标力或超力发 0，LIN 真正停住）。RKorr 为 0。
+- `RobotStatus = TRUE`（凿击）：位移控制尚未启用；当前回发默认倍率、RKorr=0。
+- RSIVisual：Ethernet **Out7** → Map2OV_PRO，输入量程必须是 **0～100**。
+- 关 RSI 前先退刀让接触力下降，倍率回到 100%，避免 `$OV_PRO` 停在 0。不要用 TRUE 当作“结束钻孔”（TRUE 表示凿击）。
+- 现场 XML 片段见 `RSIEthernet.snippet.xml`。
+- RSIEthernet SEND 中 `RobotStatus` 必须是 **BOOL**（不要再用 INT）。
+
 ## 验证建议
 
 1. 空载、无接触：补偿后 TCP 力/力矩接近 0  
 2. 接触作业：检查 TCP 力方向与幅值是否符合预期  
 3. 若偏差大：检查外参、缩放、欧拉角顺序，或增加更分散的标定姿态  
+
+## 恒力钻孔力控要点（2026-08-31 抖动事故复盘后修正）
+
+曾出现钻孔时疯狂抖动，根因有二（数据实锤，见 `rsi_data_20260831_131835.csv`）：
+
+1. **RKorr 必须是每拍增量**：KRL 使用 `RSI_ON(#RELATIVE)`。POSCORR 把每包
+   `RKorr` 叠加到当前修正上；发 `0` 表示保持。**PosCorr 的 Lower/UpperLim 限制的是
+   该对象上的总修正**（超了报 xmax），不是单拍；单拍由 PC `per_cycle_max_mm` 钳。
+   PosCorrMon.MaxTrans 再监笛卡尔总半径。目标力 <=0 时按每拍限幅反向撤除叠加。
+2. **压紧运动方向**：PosCorr 为工具系。进给 = 工具 **+X**（正增量），退刀 = 工具 **−X**（负增量）。`press_motion_sign=+1`。压紧时传感器该轴读数为负（`press_sign=-1`），与运动方向独立。
+
+其他要点：
+
+- RSI 重启后机器人叠加归零：`udp_server.py` 检测收包中断 >1s 自动 `reset()`
+- 空载重力补偿残差约 5~12N 且有漂移，`contact_threshold_n` 取 20N 才不误判接触
+- `per_cycle_max_mm=0.08` 是 PC 单拍帽；PosCorr X 须为 **±80**（总行程），PosCorrMon.MaxTrans=80
+- 不要用默认 `RSI_ON()`（`#ABSOLUTE`）：那会把 0.2 mm 增量当成 0.2 mm 总偏移
+- 验证手段：`test_force_control.py`（闭环仿真）、`test_force_e2e.py`（UDP 回环
+  端到端）；改动力控后两者都必须通过
 
 ## License
 

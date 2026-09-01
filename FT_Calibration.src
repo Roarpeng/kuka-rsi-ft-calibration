@@ -1,4 +1,4 @@
-&ACCESS RVP
+﻿&ACCESS RVP
 &REL 3
 &COMMENT Force Sensor Gravity Calibration - Diversified Poses
 DEF FT_Calibration ( )
@@ -15,7 +15,7 @@ DEF FT_Calibration ( )
   SPTP XHOME WITH $VEL_AXIS[1] = SVEL_JOINT(100.0), $TOOL = STOOL2(FHOME), $BASE = SBASE(FHOME.BASE_NO), $IPO_MODE = SIPO_MODE(FHOME.IPO_FRAME), $LOAD = SLOAD(FHOME.TOOL_NO), $ACC_AXIS[1] = SACC_JOINT(PDEFAULT), $APO = SAPO_PTP(PDEFAULT), $GEAR_JERK[1] = SGEAR_JERK(PDEFAULT), $COLLMON_TOL_PRO[1] = USE_CM_PRO_VALUES(0)
   ;ENDFOLD
 
-  ; ---------- 1. 坐标系与动力学 ----------
+  ; ---------- 1. Frames and Dynamics Configuration ----------
   $ACT_BASE = 1
   $BASE = BASE_DATA[1]
   $ACT_TOOL = 1
@@ -32,92 +32,83 @@ DEF FT_Calibration ( )
 
   data_collection = FALSE
 
-  ; 基准点（后续 XYZ 仅在 ±20mm 内微调）
+  ; Reference position (Subsequent XYZ coordinates are trimmed within +/-20 mm)
   ; BASE: X1120 Y240 Z-1200 A-170 B0 C0
 
-  ; ---------- 2. 先 PTP 到基准，锁定轴构型 ----------
+  ; ---------- 2. PTP to Reference Pose (Lock Axis Configuration) ----------
   PTP {X 1120.0, Y 240.0, Z -1200.0, A -170.0, B 0.0, C 0.0}
   WAIT SEC 0.2
 
-  ; ---------- 3. 启动 RSI ----------
+  ; ---------- 3. Start RSI Communication ----------
   RSI_Control(TRUE)
 
-  ; ---------- 4. 16 个分散姿态（A 固定 -170，B/C 覆盖 ±60°） ----------
-  ; 原则（按数据分析结论修订）：
-  ; - 重力几乎沿 BASE 系 -Z，A 是绕重力轴旋转 -> 改 A 对力标定零激励，
-  ;   且只会拧管线包。因此全程 A=-170 不变
-  ; - 激励全部来自 B/C：四角 + 四边中点覆盖 ±60°，重力在传感器系
-  ;   三轴均有正有负，z 向投影最深到 -0.25（倾斜 75°）
-  ; - 基准姿态 (B0,C0) 采 3 次（首/中/尾），用于量化漂移与管线包迟滞
-  ; - 相邻姿态只变一个角（除回程），减小管线包扰动
-  ; - XYZ 在 ±20mm 内微调，避免工作空间冲突
-  ; - 每点 RECORD_SAMPLE: 静止 0.5s -> TRUE 1.0s -> FALSE
+  ; ---------- 4. 16 Dispersed Poses (A fixed at -170 deg, B/C spanning +/-50 deg) ----------
 
-  ; 姿态 1：基准（第 1 次）
+  ; Pose 1: Reference (1st iteration)
   LIN {X 1120.0, Y 240.0, Z -1200.0, A -170.0, B 0.0, C 0.0}
   RECORD_SAMPLE()
 
-  ; 姿态 2：B+60
-  LIN {X 1135.0, Y 240.0, Z -1200.0, A -170.0, B 60.0, C 0.0}
+  ; Pose 2: B+60
+  LIN {X 1135.0, Y 240.0, Z -1200.0, A -170.0, B 50.0, C 0.0}
   RECORD_SAMPLE()
 
-  ; 姿态 3：B+60 / C+60
-  LIN {X 1130.0, Y 250.0, Z -1190.0, A -170.0, B 60.0, C 60.0}
+  ; Pose 3: B+60 / C+60
+  LIN {X 1130.0, Y 250.0, Z -1190.0, A -170.0, B 50.0, C 60.0}
   RECORD_SAMPLE()
 
-  ; 姿态 4：C+60
+  ; Pose 4: C+60
   LIN {X 1120.0, Y 255.0, Z -1200.0, A -170.0, B 0.0, C 60.0}
   RECORD_SAMPLE()
 
-  ; 姿态 5：B-60 / C+60
-  LIN {X 1110.0, Y 250.0, Z -1190.0, A -170.0, B -60.0, C 60.0}
+  ; Pose 5: B-60 / C+60
+  LIN {X 1110.0, Y 250.0, Z -1190.0, A -170.0, B -50.0, C 60.0}
   RECORD_SAMPLE()
 
-  ; 姿态 6：B-60
-  LIN {X 1105.0, Y 240.0, Z -1200.0, A -170.0, B -60.0, C 0.0}
+  ; Pose 6: B-60
+  LIN {X 1105.0, Y 240.0, Z -1200.0, A -170.0, B -50.0, C 0.0}
   RECORD_SAMPLE()
 
-  ; 姿态 7：B-60 / C-60
-  LIN {X 1110.0, Y 230.0, Z -1210.0, A -170.0, B -60.0, C -60.0}
+  ; Pose 7: B-60 / C-60
+  LIN {X 1110.0, Y 230.0, Z -1210.0, A -170.0, B -50.0, C -60.0}
   RECORD_SAMPLE()
 
-  ; 姿态 8：C-60
+  ; Pose 8: C-60
   LIN {X 1120.0, Y 225.0, Z -1200.0, A -170.0, B 0.0, C -60.0}
   RECORD_SAMPLE()
 
-  ; 姿态 9：B+60 / C-60
-  LIN {X 1130.0, Y 230.0, Z -1210.0, A -170.0, B 60.0, C -60.0}
+  ; Pose 9: B+60 / C-60
+  LIN {X 1130.0, Y 230.0, Z -1210.0, A -170.0, B 50.0, C -60.0}
   RECORD_SAMPLE()
 
-  ; 姿态 10：基准（第 2 次，漂移检查）
+  ; Pose 10: Reference (2nd iteration, drift check)
   LIN {X 1120.0, Y 240.0, Z -1200.0, A -170.0, B 0.0, C 0.0}
   RECORD_SAMPLE()
 
-  ; 姿态 11：B+45 / C+45
+  ; Pose 11: B+45 / C+45
   LIN {X 1130.0, Y 250.0, Z -1195.0, A -170.0, B 45.0, C 45.0}
   RECORD_SAMPLE()
 
-  ; 姿态 12：B-45 / C+45
+  ; Pose 12: B-45 / C+45
   LIN {X 1110.0, Y 250.0, Z -1195.0, A -170.0, B -45.0, C 45.0}
   RECORD_SAMPLE()
 
-  ; 姿态 13：B-45 / C-45
+  ; Pose 13: B-45 / C-45
   LIN {X 1110.0, Y 230.0, Z -1205.0, A -170.0, B -45.0, C -45.0}
   RECORD_SAMPLE()
 
-  ; 姿态 14：B+45 / C-45
+  ; Pose 14: B+45 / C-45
   LIN {X 1130.0, Y 230.0, Z -1205.0, A -170.0, B 45.0, C -45.0}
   RECORD_SAMPLE()
 
-  ; 姿态 15：中角度补点 B-30 / C+30
+  ; Pose 15: Intermediate angle supplement B-30 / C+30
   LIN {X 1115.0, Y 245.0, Z -1195.0, A -170.0, B -30.0, C 30.0}
   RECORD_SAMPLE()
 
-  ; 姿态 16：基准（第 3 次，迟滞检查）
+  ; Pose 16: Reference (3rd iteration, hysteresis check)
   LIN {X 1120.0, Y 240.0, Z -1200.0, A -170.0, B 0.0, C 0.0}
   RECORD_SAMPLE()
 
-  ; ---------- 5. 关 RSI、回 HOME ----------
+  ; ---------- 5. Stop RSI and Return HOME ----------
   RSI_Control(FALSE)
 
   PTP {X 1120.0, Y 240.0, Z -1200.0, A -170.0, B 0.0, C 0.0}
@@ -131,8 +122,8 @@ DEF FT_Calibration ( )
 
 END
 
-; ---------- 样本采集：静止 0.5s -> TRUE 1.0s -> FALSE ----------
-; 大角度运动后给足沉降时间，采集窗拉长到 1s 压低均值噪声
+; ---------- Sample Acquisition: Dwell 0.5s -> TRUE 1.0s -> FALSE ----------
+; Allow sufficient settling time after large angular moves; sampling window extended to 1.0s to reduce mean noise
 DEF RECORD_SAMPLE ( )
   WAIT SEC 0.5
   data_collection = TRUE

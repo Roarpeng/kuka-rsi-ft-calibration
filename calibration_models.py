@@ -41,21 +41,32 @@ class StaticDetectionConfig:
 class ForceControlConfig:
     """恒力打磨控制器参数。"""
     axis: str = "X"                        # 压紧轴（工具系）
-    press_sign: int = -1                   # 接触力读数符号：沿 +axis 压紧时读数为负 -> -1
+    press_sign: int = -1                   # 接触力读数符号：压紧时该轴读数为负 -> -1
+    press_motion_sign: int = 1             # 增大压紧力的运动方向（工具系）：+1 = 沿工具 +axis 进给（退刀为 -X）
     default_target_force_n: float = 50.0   # 机器人未发 target_force 时的默认目标力
     kp_mm_per_s_per_n: float = 0.08        # 比例增益：每牛误差 -> mm/s 修正速度
     ki_mm_per_s2_per_n: float = 0.3        # 积分增益
     integral_limit_n_s: float = 50.0       # 积分限幅（抗饱和）
-    per_cycle_max_mm: float = 0.2          # 每周期（4ms）RKorr 限幅
-    cumulative_max_mm: float = 20.0        # 累积修正限幅（防跑飞）
+    per_cycle_max_mm: float = 0.08         # 每拍 RKorr 增量限幅（0.08mm/4ms=20mm/s）；PosCorr Lim 是总行程不是这一项
+    cumulative_max_mm: float = 80.0        # 内部总偏移限幅；须 ≤ RSIVisual POSCORRMON.MaxTrans
     deadband_n: float = 1.0                # 力误差死区
     contact_threshold_n: float = 3.0       # 接触判定阈值
     search_speed_mm_s: float = 4.0         # 未接触时的搜索速度（仅 search_before_contact=True 时生效）
     search_before_contact: bool = True     # True=打磨（接触前主动找表面）；False=钻孔（接触前零修正，路径自行进给，且钻穿后不前冲）
-    advance_speed_mm_s: float = 2.0        # "加压方向"修正速度上限（防接触瞬态前冲）；退刀方向不受此限
-    filter_window: int = 8                 # 力滑动平均窗口（帧，4ms/帧）
+    advance_speed_mm_s: float = 4.0        # 加压方向净 TCP 速度上限；力在快速爬升时会被置 0，避免刚性表面顶死
+    path_feed_mm_s: float = 10.0           # 编程路径沿压紧方向的进给（mm/s），接触后由 RKorr 抵消；须与 $VEL.CP 一致
+    path_feed_hold_s: float = 0.08         # 接触中 Act 反向（弹跳）时，在此时间内仍按编程进给抵消，避免前冲
+    contact_lost_s: float = 0.024          # 连续卸荷这么久才退出接触；短于 30Hz 半周期则会被弹跳抖掉
+    trip_clear_s: float = 0.20             # 超力解除须连续卸荷这么久；单帧过零不得松手
+    rkorr_frame: str = "tool"              # 与 RSIVisual PosCorr.RefCorrSys 对齐：tool 或 base
+    filter_window: int = 5                 # 兼容旧配置：默认当作 filter_median_window
+    filter_median_window: int = 5          # 控制通道中值窗口（帧），抑制 1～2 拍脉冲
+    filter_protect_window: int = 3         # 接触判定短中值（帧），忽略单帧毛刺
+    filter_lpf_hz: float = 8.0             # 控制通道一阶低通截止（Hz），压掉 ~30Hz 弹跳
     max_force_n: float = 120.0             # 超力保护阈值
     cycle_s: float = 0.004                 # RSI 周期
+    default_ov_pro: float = 100.0          # 非钻孔（凿击占位/叠加测试）时回发的 $OV_PRO（%）
+    ov_pro_slew_pct: float = 2.0           # 钻孔中每拍倍率变化上限（2%/4ms）；结束钻孔时直接拉回默认
 
 
 @dataclass

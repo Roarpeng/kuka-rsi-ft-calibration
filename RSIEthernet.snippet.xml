@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  与现场 RSIEthernet.xml 对齐的 SEND / RECEIVE 片段。
+  Map2OV_PRO：Ethernet Out7（IND 7）→ 对象输入，量程必须是 0～100（程序倍率 %）。
+  实际路径速度 = $VEL.CP × OV_PRO/100。发 0 会真正停住 LIN。
+  RobotStatus：FALSE=钻孔（控 $OV_PRO）；TRUE=凿击（位移后续再做）。
+  RKorr HOLDON="0"：丢包时修正归零，避免漂移。
+-->
+<SEND>
+  <ELEMENTS>
+    <ELEMENT TAG="Fx_raw" TYPE="LONG" INDX="1" />
+    <ELEMENT TAG="Fy_raw" TYPE="LONG" INDX="2" />
+    <ELEMENT TAG="Fz_raw" TYPE="LONG" INDX="3" />
+    <ELEMENT TAG="Mx_raw" TYPE="LONG" INDX="4" />
+    <ELEMENT TAG="My_raw" TYPE="LONG" INDX="5" />
+    <ELEMENT TAG="Mz_raw" TYPE="LONG" INDX="6" />
+    <ELEMENT TAG="Act_X"  TYPE="DOUBLE" INDX="7" />
+    <ELEMENT TAG="Act_Y"  TYPE="DOUBLE" INDX="8" />
+    <ELEMENT TAG="Act_Z"  TYPE="DOUBLE" INDX="9" />
+    <ELEMENT TAG="Act_A"  TYPE="DOUBLE" INDX="10" />
+    <ELEMENT TAG="Act_B"  TYPE="DOUBLE" INDX="11" />
+    <ELEMENT TAG="Act_C"  TYPE="DOUBLE" INDX="12" />
+    <ELEMENT TAG="data_collection" TYPE="BOOL" INDX="13" />
+    <ELEMENT TAG="RobotStatus" TYPE="BOOL" INDX="14" />
+  </ELEMENTS>
+</SEND>
+<RECEIVE>
+  <ELEMENTS>
+    <ELEMENT TAG="RKorr.X" TYPE="DOUBLE" INDX="1" HOLDON="0" />
+    <ELEMENT TAG="RKorr.Y" TYPE="DOUBLE" INDX="2" HOLDON="0" />
+    <ELEMENT TAG="RKorr.Z" TYPE="DOUBLE" INDX="3" HOLDON="0" />
+    <ELEMENT TAG="RKorr.A" TYPE="DOUBLE" INDX="4" HOLDON="0" />
+    <ELEMENT TAG="RKorr.B" TYPE="DOUBLE" INDX="5" HOLDON="0" />
+    <ELEMENT TAG="RKorr.C" TYPE="DOUBLE" INDX="6" HOLDON="0" />
+    <ELEMENT TAG="OV_PRO" TYPE="DOUBLE" INDX="7" />
+  </ELEMENTS>
+</RECEIVE>

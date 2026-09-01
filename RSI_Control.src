@@ -1,0 +1,54 @@
+&ACCESS RVO1
+&REL 2
+&COMMENT Robust RSI ON/OFF Management
+DEF RSI_Control (CMD_ENABLE :IN)
+  BOOL CMD_ENABLE
+
+  IF CMD_ENABLE THEN
+  
+    IF ($ACT_BASE <= 0) THEN
+      $BASE = $NULLFRAME
+      $ACT_BASE = 0
+    ELSE
+      $BASE = BASE_DATA[$ACT_BASE]
+    ENDIF
+
+    IF ($ACT_TOOL <= 0) THEN
+      $TOOL = $NULLFRAME
+      $ACT_TOOL = 0
+    ELSE
+      $TOOL = TOOL_DATA[$ACT_TOOL]
+    ENDIF
+
+    $IPO_MODE = #BASE
+
+
+    RSI_FT_ERRCODE = RSI_CREATE("RSI_FT", RSICountID)
+    IF (RSI_FT_ERRCODE == 0) THEN
+      ; 须与上位机每拍增量 RKorr 一致。默认 #ABSOLUTE 会把增量当绝对偏移。
+      RSI_FT_ERRCODE = RSI_ON(#RELATIVE)
+      IF (RSI_FT_ERRCODE == 0) THEN
+        RSI_FT_ACTIVE = TRUE
+        RSI_FT_ERROR = FALSE
+      ELSE
+        RSI_FT_ACTIVE = FALSE
+        RSI_FT_ERROR = TRUE
+        RSI_FT_ERRCODE = RSI_DELETE(RSICountID)
+      ENDIF
+    ELSE
+      RSI_FT_ACTIVE = FALSE
+      RSI_FT_ERROR = TRUE
+    ENDIF
+
+
+  ELSE
+
+    IF RSI_CHECKID(RSICountID) THEN
+      RSI_FT_ERRCODE = RSI_OFF()
+      RSI_FT_ERRCODE = RSI_DELETE(RSICountID)
+    ENDIF
+    RSI_FT_ACTIVE = FALSE
+    RSI_FT_ERROR = FALSE
+  ENDIF
+
+END
