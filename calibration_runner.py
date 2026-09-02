@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections import deque
 from datetime import datetime
-from typing import Any
+from typing import Any, Callable, Optional
 
 from calibration_io import save_calibration_result, save_samples
 from calibration_math import (
@@ -28,6 +28,16 @@ class CalibrationRunner:
         self._was_collecting = False
         self._last_logged_dc: bool | None = None
         self.sensor_to_tcp_rotation, self.sensor_to_tcp_translation_m = self._build_sensor_to_tcp()
+        # Web 监控层可选事件回调：best-effort，异常不拖垮控制环
+        self.on_event: Optional[Callable[[str, str], None]] = None
+
+    def _emit_event(self, level: str, message: str):
+        """事件回调（level: info/warning/error）；回调异常一律吞掉。"""
+        if self.on_event is not None:
+            try:
+                self.on_event(level, message)
+            except Exception:
+                pass
 
     def _build_sensor_to_tcp(self) -> tuple[list[list[float]], list[float]]:
         sensor_to_flange = self.config.sensor_to_flange
@@ -132,12 +142,14 @@ class CalibrationRunner:
         self.samples.append(sample)
         self.last_sample_angles = sample.tcp_angles_deg
         save_samples(self.config.files.sample_path, self.samples)
-        print(
+        message = (
             f"[标定] 样本 {len(self.samples)}/"
-            f"{self.config.static_detection.min_samples} "
+            f"{self.config.static_detection.min_samples} 已保存 "
             f"(帧数={sample.frame_count}, 时长={sample.duration_seconds:.3f}s, "
             f"姿态 A/B/C={sample.tcp_angles_deg[0]:.1f}/{sample.tcp_angles_deg[1]:.1f}/{sample.tcp_angles_deg[2]:.1f})"
         )
+        print(message)
+        self._emit_event("info", message)
 
         if len(self.samples) >= self.config.static_detection.min_samples:
             self.calibration_result = fit_gravity_model(
@@ -155,6 +167,12 @@ class CalibrationRunner:
                 f"残差力矩 RMS={self.calibration_result.residual_torque_rms_nm:.3f} N·m"
             )
             print("[标定] 已切换到运行补偿模式（TCP 受力输出）")
+            self._emit_event(
+                "info",
+                f"[标定] 完成：mass={self.calibration_result.mass_kg:.3f} kg, "
+                f"残差力 RMS={self.calibration_result.residual_force_rms_n:.3f} N, "
+                f"残差力矩 RMS={self.calibration_result.residual_torque_rms_nm:.3f} N·m，已切换到运行补偿模式",
+            )
             return "calibration_ready"
         return "sample_saved"
 

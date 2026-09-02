@@ -7,9 +7,14 @@ venv/
 
 # Runtime / calibration outputs
 *.csv
+data/
+*.lock
 ft_calibration.json
 ft_calibration_samples.json
 ft_calibration_fixed.json
+ft_calibration_backup_*.json
+ft_calibration_samples_backup_*.json
+ft_calibration_samples_partial_*.json
 pktmon_*.txt
 _pktmon_cap.txt
 

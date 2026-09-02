@@ -1,0 +1,2 @@
+# Shell 脚本必须 LF 行尾，避免在 Ubuntu 上执行失败
+*.sh text eol=lf

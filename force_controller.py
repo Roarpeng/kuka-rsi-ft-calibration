@@ -29,7 +29,7 @@ from __future__ import annotations
 
 import math
 from collections import deque
-from typing import Optional
+from typing import Callable, Optional
 
 from calibration_math import euler_to_matrix, matrix_vector_multiply
 from calibration_models import ForceControlConfig
@@ -103,6 +103,16 @@ class ForceController:
         self._last_press_raw: Optional[float] = None
         self._bounce_hold = 0
         self.ov_pro_pct = config.default_ov_pro
+        # Web 监控层可选事件回调：best-effort，异常不拖垮控制环
+        self.on_event: Optional[Callable[[str, str], None]] = None
+
+    def _emit_event(self, level: str, message: str):
+        """事件回调（level: info/warning/error）；回调异常一律吞掉。"""
+        if self.on_event is not None:
+            try:
+                self.on_event(level, message)
+            except Exception:
+                pass
 
     def reset(self):
         self.integral_n_s = 0.0
@@ -184,7 +194,9 @@ class ForceController:
         trip_clear_n = max(1, int(round(cfg.trip_clear_s / cfg.cycle_s)))
         if abs(f_axis_raw) > cfg.max_force_n:
             if not self.tripped:
-                print(f"[力控] 超力保护！{cfg.axis} 轴力 {f_axis_raw:.1f} N 超过 {cfg.max_force_n:.1f} N，全速退刀")
+                message = f"[力控] 超力保护！{cfg.axis} 轴力 {f_axis_raw:.1f} N 超过 {cfg.max_force_n:.1f} N，全速退刀"
+                print(message)
+                self._emit_event("error", message)
             self.tripped = True
             self._trip_ok_count = 0
         elif self.tripped:
@@ -194,6 +206,7 @@ class ForceController:
                     self.tripped = False
                     self._trip_ok_count = 0
                     print("[力控] 力已回落，解除保护")
+                    self._emit_event("info", "[力控] 力已回落，解除保护")
             else:
                 self._trip_ok_count = 0
 
@@ -263,8 +276,10 @@ class ForceController:
             else:
                 self._lost_count = 0
         if self.in_contact != was_in_contact:
-            print(f"[力控] 接触状态 -> {'已接触' if self.in_contact else '未接触'}"
-                  f"（{cfg.axis} 轴压紧力 fast={press_fast:.1f} slow={press_slow:.1f} raw={press_raw:.1f} N）")
+            message = (f"[力控] 接触状态 -> {'已接触' if self.in_contact else '未接触'}"
+                       f"（{cfg.axis} 轴压紧力 fast={press_fast:.1f} slow={press_slow:.1f} raw={press_raw:.1f} N）")
+            print(message)
+            self._emit_event("info", message)
 
         corr_tool = [0.0, 0.0, 0.0]
         holding_lost = self.in_contact and self._lost_count > 0

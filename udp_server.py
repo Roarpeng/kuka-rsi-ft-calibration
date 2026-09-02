@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import argparse
+import collections
 import csv
+import os
 import random
 import socket
 import subprocess
@@ -10,7 +12,7 @@ import time
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Callable, Optional
 
 from calibration_io import load_calibration_result, load_config
 from calibration_models import CalibratedWrench
@@ -170,7 +172,9 @@ class RSIServer:
         self.csv_filename = csv_filename
         self.sock: Optional[socket.socket] = None
         self.client_address: Optional[tuple] = None
-        self.rsi_data_list: list[RSIData] = []
+        # 有界缓冲（最近 ~10s @250Hz），供 Web 监控读取；不再无限增长
+        self.rsi_data_list: collections.deque[RSIData] = collections.deque(maxlen=2500)
+        self.data_dir: str = "data"  # CSV 数据目录（_init_csv 时生效，可运行时改）
         self.csv_file = None
         self.csv_writer = None
 
@@ -178,10 +182,29 @@ class RSIServer:
         self.calibration_runner: Optional[CalibrationRunner] = None
         self.force_controller: Optional[ForceController] = None
         self.force_mode = False
+        # 自动重标定状态（换工具后示教器跑 FT_Calibration.src，服务无需重启/改模式）
+        self.auto_calibrating = False  # 本轮标定由 data_collection=TRUE 边沿自动触发
+        self.force_suspended = False   # 标定期间力控挂起：RKorr=0、OV_PRO=100%
+        self.force_requested = False   # 服务以 --force 启动（标定完成后自动恢复力控）
+        self._last_data_collection = False  # 上一帧 data_collection，用于上升沿检测
         self.tx_count = 0
         self.rx_count = 0
         self.parse_ok_count = 0
+        self.packet_count = 0  # run() 主循环累计成功解析包数（Web 监控可读）
+        self.last_rx_monotonic: Optional[float] = None  # 最近收包时刻（供 Web 监控判断链路活性）
         self._warned_missing_target = False
+
+        # Web 监控层可选回调：均为 best-effort，异常不拖垮控制环
+        self.on_frame: Optional[Callable[[RSIData], None]] = None
+        self.on_event: Optional[Callable[[str, str], None]] = None
+
+    def _emit_event(self, level: str, message: str):
+        """事件回调（level: info/warning/error）；回调异常一律吞掉，不影响控制环。"""
+        if self.on_event is not None:
+            try:
+                self.on_event(level, message)
+            except Exception:
+                pass
 
     def start(self, enable_csv: bool = True):
         """启动 UDP 服务器"""
@@ -231,7 +254,8 @@ class RSIServer:
     def _init_csv(self):
         """初始化 CSV 文件"""
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        self.csv_filename = f"rsi_data_{timestamp}.csv"
+        os.makedirs(self.data_dir, exist_ok=True)
+        self.csv_filename = os.path.join(self.data_dir, f"rsi_data_{timestamp}.csv")
         self.csv_file = open(self.csv_filename, "w", newline="", encoding="utf-8")
         self.csv_writer = csv.writer(self.csv_file)
         if self.csv_writer is None:
@@ -277,9 +301,11 @@ class RSIServer:
 
         except ET.ParseError as error:
             print(f"XML 解析错误：{error}")
+            self._emit_event("error", f"XML 解析错误：{error}")
             return None
         except (ValueError, AttributeError) as error:
             print(f"数据解析错误：{error}")
+            self._emit_event("error", f"数据解析错误：{error}")
             return None
 
     def generate_response(self, rsi_data: RSIData) -> str:
@@ -325,7 +351,64 @@ class RSIServer:
         lines.append("</Sen>")
         return "\n".join(lines)
 
+    def _check_auto_calibration(self, rsi_data: RSIData):
+        """换工具重标定：data_collection 的 FALSE->TRUE 上升沿触发（任何模式），
+        自动清空旧样本并进入标定模式（服务无需重启/改模式）。
+        必须用上升沿而非电平：求解完成当拍该段残留的 TRUE 不得重新触发。"""
+        if (
+            not rsi_data.data_collection
+            or self._last_data_collection
+            or self.auto_calibrating
+            or self.calibration_config is None
+            or self.calibration_runner is None
+            or self.calibration_config.mode == "calibration_collect"
+        ):
+            return
+        self.calibration_runner.samples.clear()
+        self.calibration_runner.last_sample_angles = None
+        self.calibration_config.mode = "calibration_collect"
+        self.auto_calibrating = True
+        message = "[标定] 检测到标定程序信号（data_collection=TRUE），自动进入标定模式"
+        print(message)
+        self._emit_event("info", message)
+        if self.force_mode and self.force_controller is not None:
+            # 标定期间挂起力控：RKorr 全 0、倍率回 100%，防止旧标定补偿误动
+            self.force_controller.reset()
+            for tag in self.config.rkorr:
+                self.config.rkorr[tag] = 0.0
+            self.config.ov_pro = 100.0
+            self.force_suspended = True
+            message = "[标定] 力控已挂起，RKorr=0、OV_PRO=100%"
+            print(message)
+            self._emit_event("warning", message)
+
+    def _check_force_restore(self):
+        """标定求解完成（runner 已把 mode 切回 calibrated_runtime）后，
+        若服务以 --force 启动则自动恢复力控。"""
+        if (
+            not self.auto_calibrating
+            or self.calibration_config is None
+            or self.calibration_config.mode != "calibrated_runtime"
+        ):
+            return
+        self.auto_calibrating = False
+        if not self.force_requested:
+            return
+        self.force_suspended = False
+        if self.force_controller is None:
+            self.force_controller = ForceController(
+                self.calibration_config.force_control,
+                rsi_rotation_order=self.calibration_config.rsi_rotation_order,
+            )
+        self.force_controller.reset()
+        self.force_mode = True
+        message = "[标定] 标定完成，力控已自动恢复"
+        print(message)
+        self._emit_event("info", message)
+
     def process_frame(self, rsi_data: RSIData) -> RSIData:
+        self._check_auto_calibration(rsi_data)
+        self._last_data_collection = rsi_data.data_collection
         frame = {
             "timestamp": rsi_data.timestamp,
             "iPOC": rsi_data.iPOC,
@@ -349,6 +432,7 @@ class RSIServer:
             return rsi_data
 
         processed = self.calibration_runner.process_frame(frame)
+        self._check_force_restore()
         sensor_wrench = processed.get("sensor_wrench", [0.0] * 6)
         calibrated_wrench: CalibratedWrench | None = processed.get("calibrated_wrench")
 
@@ -589,10 +673,10 @@ class RSIServer:
             self.start()
             if self.sock is None:
                 raise RuntimeError("UDP socket initialization failed")
-            packet_count = 0
+            self.packet_count = 0
             wait_started = time.monotonic()
             last_wait_print = wait_started
-            last_rx_monotonic: Optional[float] = None
+            self.last_rx_monotonic = None
             seen_sources: set[tuple] = set()
 
             while True:
@@ -606,40 +690,59 @@ class RSIServer:
                     if (
                         self.force_mode
                         and self.force_controller is not None
-                        and last_rx_monotonic is not None
-                        and now_rx - last_rx_monotonic > 1.0
+                        and self.last_rx_monotonic is not None
+                        and now_rx - self.last_rx_monotonic > 1.0
                     ):
                         self.force_controller.reset()
                         print("[力控] 收包中断 >1s，判定 RSI 重启，修正累积已清零")
-                    last_rx_monotonic = now_rx
+                        self._emit_event("warning", "[力控] 收包中断 >1s，判定 RSI 重启，修正累积已清零")
+                    self.last_rx_monotonic = now_rx
 
                     if address not in seen_sources:
                         seen_sources.add(address)
                         print(f"\n收到来自 {address} 的 UDP（源 {len(seen_sources)}）")
+                        self._emit_event("info", f"收到来自 {address} 的 UDP")
                     if self.client_address is None:
                         self.client_address = address
 
                     rsi_data = self.parse_rsi_xml(data)
 
                     if rsi_data:
-                        packet_count += 1
-                        if self.force_mode and self.force_controller is not None:
+                        self.packet_count += 1
+                        # 力控生效需：有力控器 + 未挂起 + 已有标定结果（无结果时无补偿值，力控无意义）
+                        force_active = (
+                            self.force_mode
+                            and self.force_controller is not None
+                            and not self.force_suspended
+                            and self.calibration_runner is not None
+                            and self.calibration_runner.calibration_result is not None
+                        )
+                        if force_active:
                             # 力控模式：先用当前帧算 RKorr，再回包（同一 IPOC）
                             rsi_data = self.process_frame(rsi_data)
-                            self._update_force_reply(rsi_data)
+                            if self.force_suspended:
+                                # 本帧刚触发自动标定：RKorr 全 0、倍率回 100%
+                                for tag in self.config.rkorr:
+                                    self.config.rkorr[tag] = 0.0
+                                self.config.ov_pro = 100.0
+                            else:
+                                self._update_force_reply(rsi_data)
                             response_xml = self._reply(rsi_data, address)
                         else:
+                            if self.force_mode:
+                                # 力控挂起中（自动标定进行中或暂无标定结果）：RKorr=0、OV_PRO=100%
+                                self.config.ov_pro = 100.0
                             # RSI 4ms 周期：先回传同一 IPOC，再做标定/写盘
                             response_xml = self._reply(rsi_data, address)
                             rsi_data = self.process_frame(rsi_data)
 
-                        if packet_count == 1:
+                        if self.packet_count == 1:
                             print(f"  原文: {data.decode('utf-8', errors='replace')[:500]}")
                             if response_xml:
                                 print(f"  RSI 回复已发送: {response_xml}")
 
-                        if packet_count % 100 == 1:
-                            print(f"\n已接收 {packet_count} 个数据包")
+                        if self.packet_count % 100 == 1:
+                            print(f"\n已接收 {self.packet_count} 个数据包")
                             print(f"  IPOC={rsi_data.iPOC}")
                             print(f"  Fx_raw={rsi_data.Fx_raw}, Fy_raw={rsi_data.Fy_raw}, Fz_raw={rsi_data.Fz_raw}")
                             print(f"  Mx_raw={rsi_data.Mx_raw}, My_raw={rsi_data.My_raw}, Mz_raw={rsi_data.Mz_raw}")
@@ -672,9 +775,14 @@ class RSIServer:
 
                         self.save_to_csv(rsi_data)
                         self.rsi_data_list.append(rsi_data)
+                        if self.on_frame is not None:
+                            try:
+                                self.on_frame(rsi_data)
+                            except Exception:
+                                pass
 
                 except socket.timeout:
-                    if packet_count == 0:
+                    if self.packet_count == 0:
                         now = time.monotonic()
                         if now - last_wait_print >= 2.0:
                             waited = now - wait_started
@@ -752,6 +860,29 @@ def create_parser() -> argparse.ArgumentParser:
         default=15.0,
         help="链路测试等待第一包的最长时间（秒）"
     )
+    parser.add_argument(
+        "--web-port",
+        type=int,
+        default=8080,
+        help="Web 监控端口（默认 8080）"
+    )
+    parser.add_argument(
+        "--no-web",
+        action="store_true",
+        help="不启动 Web 监控服务"
+    )
+    parser.add_argument(
+        "--data-cap-mb",
+        type=int,
+        default=2048,
+        help="CSV 数据目录容量上限 MB，超出自动删最旧未锁定文件（默认 2048）"
+    )
+    parser.add_argument(
+        "--data-dir",
+        type=str,
+        default="data",
+        help="CSV 数据目录（默认 data）"
+    )
     return parser
 
 
@@ -816,6 +947,7 @@ def main():
         print("RSI 回包：RKorr 全 0（收包即回，维持双向闭环）\n")
 
     server = RSIServer(config=config)
+    server.data_dir = args.data_dir
     server.calibration_config = calibration_config
     server.calibration_runner = CalibrationRunner(calibration_config)
 
@@ -827,14 +959,27 @@ def main():
             print("检测到已有标定结果，自动启用补偿")
 
     if args.force:
-        if calibration_result is None:
-            print("错误：力控模式需要已有标定结果（ft_calibration.json），请先运行 --calibrate 完成标定")
-            sys.exit(1)
-        server.force_controller = ForceController(
-            calibration_config.force_control,
-            rsi_rotation_order=calibration_config.rsi_rotation_order,
-        )
+        server.force_requested = True
         server.force_mode = True
+        if calibration_result is None:
+            # 无标定结果不再退出：力控挂起待激活，自动标定完成后恢复
+            # （覆盖"换工具→重新标定→恢复生产"全流程，服务常驻即可）
+            server.force_suspended = True
+            print("警告：暂无标定结果，力控待标定完成后自动激活")
+            print("      在示教器运行 FT_Calibration.src 即可自动完成标定并恢复力控\n")
+        else:
+            server.force_controller = ForceController(
+                calibration_config.force_control,
+                rsi_rotation_order=calibration_config.rsi_rotation_order,
+            )
+
+    # Web 监控层由独立模块提供；缺失/启动失败不影响主控制环
+    if not args.no_web:
+        try:
+            from web_monitor import start_web_server
+            start_web_server(server, data_dir=args.data_dir, data_cap_mb=args.data_cap_mb, port=args.web_port)
+        except Exception as error:
+            print(f"警告：Web 监控启动失败（{error}），继续运行主程序")
 
     server.run()
 

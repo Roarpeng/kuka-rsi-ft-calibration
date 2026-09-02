@@ -1,0 +1,169 @@
+/* KUKA RSI 监控台样式：深色工业风 */
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  padding: 0 16px 32px;
+  background: #1b1f24;
+  color: #d7dde4;
+  font-family: "Microsoft YaHei", "PingFang SC", "Segoe UI", sans-serif;
+  font-size: 14px;
+}
+
+header h1 {
+  font-size: 20px;
+  margin: 16px 0 12px;
+  color: #f0f3f6;
+}
+
+.panel {
+  background: #242a31;
+  border: 1px solid #333b44;
+  border-radius: 6px;
+  padding: 12px 16px;
+  margin-bottom: 16px;
+}
+
+.panel h2 {
+  font-size: 15px;
+  margin: 0 0 10px;
+  color: #9fb2c5;
+  border-bottom: 1px solid #333b44;
+  padding-bottom: 6px;
+}
+
+.panel h3 {
+  font-size: 13px;
+  margin: 0 0 6px;
+  color: #8fa0b0;
+  font-weight: normal;
+}
+
+/* 告警横幅 */
+.alert-banner {
+  background: #7a1f1f;
+  border: 1px solid #c0392b;
+  color: #ffd7d7;
+  border-radius: 6px;
+  padding: 10px 16px;
+  margin-bottom: 16px;
+  font-weight: bold;
+}
+
+.hidden { display: none; }
+
+/* 状态栏 */
+.status-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 8px 16px;
+}
+
+.status-item .label { color: #8fa0b0; margin-right: 8px; }
+
+.good { color: #3cb44b; font-weight: bold; }
+.bad { color: #ff5b5b; font-weight: bold; }
+
+.wrench-row {
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px dashed #333b44;
+}
+
+.wrench-row .label { color: #8fa0b0; margin-left: 16px; }
+.wrench-row .label:first-child { margin-left: 0; }
+
+/* 实时曲线 */
+.charts-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  gap: 12px;
+}
+
+.chart-box {
+  background: #1b1f24;
+  border: 1px solid #2c333b;
+  border-radius: 4px;
+  padding: 8px;
+  height: 240px;
+}
+
+.chart-wide {
+  height: 320px;
+  margin-top: 10px;
+}
+
+.chart-box canvas { width: 100% !important; height: calc(100% - 24px) !important; }
+.chart-wide canvas { height: 100% !important; }
+
+/* 事件流 */
+.event-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 240px;
+  overflow-y: auto;
+  font-family: Consolas, "Courier New", monospace;
+  font-size: 12px;
+}
+
+.event-list li { padding: 2px 4px; border-bottom: 1px solid #262c33; }
+.event-list li.event-info { color: #9fb2c5; }
+.event-list li.event-warning { color: #f5b942; }
+.event-list li.event-error { color: #ff5b5b; }
+
+/* 历史回放 */
+.history-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+}
+
+.history-controls label { color: #8fa0b0; }
+
+select, input, button {
+  background: #1b1f24;
+  color: #d7dde4;
+  border: 1px solid #3a434d;
+  border-radius: 4px;
+  padding: 4px 8px;
+  font-size: 13px;
+}
+
+button, .btn {
+  cursor: pointer;
+  text-decoration: none;
+  display: inline-block;
+  background: #2c3640;
+  color: #d7dde4;
+  border: 1px solid #3a434d;
+  border-radius: 4px;
+  padding: 4px 10px;
+  font-size: 13px;
+  margin-right: 6px;
+}
+
+button:hover, .btn:hover { background: #3a4653; }
+
+.btn-danger { border-color: #7a3030; color: #ff8a8a; }
+.btn-danger:hover { background: #4a2525; }
+.btn-danger:disabled { opacity: 0.4; cursor: not-allowed; }
+
+/* 文件表格 */
+.file-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.file-table th, .file-table td {
+  text-align: left;
+  padding: 6px 10px;
+  border-bottom: 1px solid #2c333b;
+}
+
+.file-table th { color: #8fa0b0; font-weight: normal; }
+
+.file-table tr:hover td { background: #262d35; }

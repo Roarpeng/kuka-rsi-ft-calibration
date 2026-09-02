@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>KUKA RSI 力传感器监控台</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header>
+    <h1>KUKA RSI 力传感器监控台</h1>
+  </header>
+
+  <!-- 告警横幅：断线或超力锁存时显示 -->
+  <div id="alert-banner" class="alert-banner hidden"></div>
+
+  <!-- 状态栏 -->
+  <section class="panel" id="status-panel">
+    <h2>运行状态</h2>
+    <div class="status-grid">
+      <div class="status-item"><span class="label">运行模式</span><span id="st-mode">—</span></div>
+      <div class="status-item"><span class="label">连接状态</span><span id="st-conn">—</span></div>
+      <div class="status-item"><span class="label">包计数</span><span id="st-packets">—</span></div>
+      <div class="status-item"><span class="label">标定进度</span><span id="st-calib">—</span></div>
+      <div class="status-item"><span class="label">力控状态</span><span id="st-force">—</span></div>
+      <div class="status-item"><span class="label">OV_PRO</span><span id="st-ovpro">—</span></div>
+      <div class="status-item"><span class="label">累积偏移 (mm)</span><span id="st-corr">—</span></div>
+      <div class="status-item"><span class="label">活动 CSV</span><span id="st-csv">—</span></div>
+      <div class="status-item"><span class="label">数据用量</span><span id="st-usage">—</span></div>
+    </div>
+    <div class="wrench-row">
+      <span class="label">TCP 力 (N)：</span><span id="st-tcp-f">—</span>
+      <span class="label">TCP 力矩 (N·m)：</span><span id="st-tcp-m">—</span>
+    </div>
+  </section>
+
+  <!-- 实时曲线（SSE 驱动，60s 滑动窗口） -->
+  <section class="panel">
+    <h2>实时曲线（最近 60 秒）</h2>
+    <div class="charts-row">
+      <div class="chart-box"><h3>TCP 力 (N)</h3><canvas id="chart-force"></canvas></div>
+      <div class="chart-box"><h3>TCP 力矩 (N·m)</h3><canvas id="chart-torque"></canvas></div>
+      <div class="chart-box"><h3>OV_PRO (%)</h3><canvas id="chart-ovpro"></canvas></div>
+    </div>
+  </section>
+
+  <!-- 事件流 -->
+  <section class="panel">
+    <h2>事件流</h2>
+    <ul id="event-list" class="event-list"></ul>
+  </section>
+
+  <!-- 历史回放 -->
+  <section class="panel">
+    <h2>历史回放</h2>
+    <div class="history-controls">
+      <label>文件：<select id="history-file"></select></label>
+      <label>开始：<input type="datetime-local" id="history-start" step="1"></label>
+      <label>结束：<input type="datetime-local" id="history-end" step="1"></label>
+      <button id="history-load">加载曲线</button>
+      <span id="history-info"></span>
+    </div>
+    <div class="chart-box chart-wide"><canvas id="chart-history"></canvas></div>
+  </section>
+
+  <!-- 文件管理 -->
+  <section class="panel">
+    <h2>数据文件管理</h2>
+    <table class="file-table" id="file-table">
+      <thead>
+        <tr><th>名称</th><th>大小</th><th>修改时间</th><th>状态</th><th>操作</th></tr>
+      </thead>
+      <tbody id="file-tbody"></tbody>
+    </table>
+  </section>
+
+  <script src="/static/vendor/chart.umd.min.js"></script>
+  <script src="/static/app.js"></script>
+</body>
+</html>

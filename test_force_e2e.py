@@ -10,7 +10,7 @@ from force_controller import ForceController
 from udp_server import RSIConfig, RSIServer
 
 LOOPBACK = "127.0.0.1"
-PORT = 59153  # 用别的端口避免冲突
+PORT = 59353  # 用别的端口避免冲突；59101~59200 可能被 Windows 端口排除范围占用
 
 calibration_config = load_config("ft_calibration_config.json")
 calibration_config.mode = "calibrated_runtime"

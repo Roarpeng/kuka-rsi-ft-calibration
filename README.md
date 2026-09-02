@@ -28,6 +28,7 @@ python3 udp_server.py --run
 # 力控模式（恒力钻孔）：补偿 + 恒力控制
 # RobotStatus=FALSE 钻孔：回发 OV_PRO 改 $OV_PRO；TRUE 凿击位移后续再做。
 # 机器人侧运行 FT_Drilling.src；RobotStatus 由全局变量下发
+# 无 ft_calibration.json 时不再退出：力控挂起待激活，标定完成后自动恢复
 python3 udp_server.py --force
 
 # 仅记录模式（默认）；若已有标定文件则自动启用补偿
@@ -36,6 +37,40 @@ python3 udp_server.py
 # 指定网口
 python3 udp_server.py --calibrate --ip 192.168.2.10 --port 59152
 ```
+
+## Web 监控
+
+主程序启动时默认附带 Web 监控（局域网开放，无登录，只读监控不参与控制）：
+
+```bash
+python3 udp_server.py --force --web-port 8080      # 默认 8080 端口
+python3 udp_server.py --force --no-web             # 关闭 Web
+python3 udp_server.py --data-dir data --data-cap-mb 2048   # 数据目录与容量上限
+```
+
+浏览器打开 `http://<本机IP>:8080`：
+
+- **实时**：TCP 六轴力/力矩曲线、OV_PRO、连接状态、标定进度、力控状态（SSE 推送）
+- **告警**：断线、超力保护触发等在页面顶部横幅提示，事件流记录全部事件
+- **历史回放**：任选 CSV 查看曲线，支持时间段缩放查询
+- **数据管理**：CSV 下载/删除/锁定；超出 `--data-cap-mb` 自动删除最旧的未锁定文件，锁定文件永不自动清理
+
+## Ubuntu 生产部署
+
+```bash
+sudo bash deploy/install.sh
+```
+
+安装到 `/opt/kuka-rsi` 并注册 systemd 服务 `kuka-rsi`（开机自启、崩溃 3s 自动重启）。
+切换运行模式（标定/运行/力控）：编辑 `/etc/systemd/system/kuka-rsi.service` 中的
+`RSI_MODE` 后 `systemctl daemon-reload && systemctl restart kuka-rsi`。
+
+```bash
+systemctl status kuka-rsi        # 状态
+journalctl -u kuka-rsi -f        # 日志
+```
+
+注意：本机网口需配置静态 IP `192.168.2.250`（机器人 RSI XML 的 `IP_NUMBER`）。
 
 ## 项目结构
 
@@ -49,13 +84,17 @@ python3 udp_server.py --calibrate --ip 192.168.2.10 --port 59152
 | `RSIEthernet.snippet.xml` | 与现场一致的 SEND `RobotStatus` / RECEIVE `OV_PRO` 片段 |
 | `calibration_models.py` | 配置与数据结构 |
 | `calibration_io.py` | 配置/结果/样本读写 |
+| `data_manager.py` | CSV 数据管理：锁定、删除、容量滚动清理、历史回放抽稀 |
+| `web_monitor.py` | Web 监控服务（纯标准库 HTTP + SSE），只读不参与控制 |
+| `web_static/` | 监控单页前端（Chart.js 已本地化，离线可用） |
+| `deploy/` | Ubuntu systemd 部署（`kuka-rsi.service`、`install.sh`） |
 | `ft_calibration_config.json` | 标定与外参配置 |
 
 运行后生成（已加入 `.gitignore`）：
 
 - `ft_calibration.json` — 标定结果
 - `ft_calibration_samples.json` — 采样样本
-- `rsi_data_*.csv` — 原始记录
+- `data/rsi_data_*.csv` — 原始记录（`.lock` sidecar 表示锁定）
 
 ## 标定流程
 
@@ -68,6 +107,18 @@ python3 udp_server.py --calibrate --ip 192.168.2.10 --port 59152
    - 每个 TRUE→FALSE 周期对位姿与力取均值，生成一条样本
 4. 达到最少样本数（默认 6）后自动求解并保存 `ft_calibration.json`，切换到 TCP 补偿
 5. 用 `--run` 验证：空载无接触时力/力矩应接近 0
+
+### 换工具重新标定（自动，服务无需重启/改模式）
+
+服务常驻 `--force` 运行时，换工具后只需在示教器运行 `FT_Calibration.src`：
+
+1. 上位机收到 `data_collection` 的 FALSE→TRUE 上升沿即自动进入标定（任何模式下）：
+   清空旧样本、切换到采集模式；若在力控中则自动挂起力控（RKorr=0、`OV_PRO`=100%）。
+2. 标定程序走完分散姿态、样本数达标后自动求解并保存 `ft_calibration.json`。
+3. 求解完成后自动恢复力控（无力控器则新建）；非 `--force` 启动则只完成标定。
+
+因此 `--force` 启动时即使没有 `ft_calibration.json` 也不会退出，力控处于
+"待激活"状态（RKorr=0、`OV_PRO`=100%），等自动标定完成后自动激活。
 
 ## 配置要点
 

@@ -1,0 +1,19 @@
+[Unit]
+Description=KUKA RSI 力传感器标定与恒力钻孔上位机
+# 等网络就绪再启动（RSI 依赖网口 192.168.2.250）
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/kuka-rsi
+# 运行模式：--force 恒力钻孔 / --run 实时补偿 / --calibrate 标定 / 默认仅记录
+Environment=RSI_MODE=--force
+ExecStart=/usr/bin/python3 /opt/kuka-rsi/udp_server.py $RSI_MODE --web-port 8080
+# 崩溃自动重启
+Restart=always
+RestartSec=3
+# 日志进 journald：journalctl -u kuka-rsi -f
+
+[Install]
+WantedBy=multi-user.target
