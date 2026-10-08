@@ -3,76 +3,139 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>KUKA RSI 力传感器监控台</title>
+  <title>KUKA RSI 力控监控台</title>
   <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
-  <header>
-    <h1>KUKA RSI 力传感器监控台</h1>
+
+  <!-- 机床报警条：仅断线 / 超力锁存时出现 -->
+  <div id="alert-banner" class="alarm-strip hidden" role="alert"></div>
+
+  <header class="machine-bar">
+    <div class="brand">
+      <span class="brand-plate" aria-hidden="true"></span>
+      <div class="brand-text">
+        <h1>KUKA RSI</h1>
+        <span>六维力标定 · 恒力钻孔 · 凿击让位</span>
+      </div>
+    </div>
+    <div class="lamps">
+      <span class="lamp" id="lamp-mode"><i></i><b>模式</b><em>—</em></span>
+      <span class="lamp" id="lamp-force"><i></i><b>力控</b><em>—</em></span>
+      <span class="lamp" id="lamp-chisel"><i></i><b>凿击</b><em>—</em></span>
+      <span class="lamp" id="lamp-link"><i></i><b>链路</b><em>—</em></span>
+    </div>
+    <div class="cycle" title="收到 RSI 帧时点亮">
+      <span class="cycle-dot" id="cycle-dot"></span>
+      <span class="cycle-text">RSI 4 ms</span>
+    </div>
   </header>
 
-  <!-- 告警横幅：断线或超力锁存时显示 -->
-  <div id="alert-banner" class="alert-banner hidden"></div>
+  <main class="bench">
 
-  <!-- 状态栏 -->
-  <section class="panel" id="status-panel">
-    <h2>运行状态</h2>
-    <div class="status-grid">
-      <div class="status-item"><span class="label">运行模式</span><span id="st-mode">—</span></div>
-      <div class="status-item"><span class="label">连接状态</span><span id="st-conn">—</span></div>
-      <div class="status-item"><span class="label">包计数</span><span id="st-packets">—</span></div>
-      <div class="status-item"><span class="label">标定进度</span><span id="st-calib">—</span></div>
-      <div class="status-item"><span class="label">力控状态</span><span id="st-force">—</span></div>
-      <div class="status-item"><span class="label">OV_PRO</span><span id="st-ovpro">—</span></div>
-      <div class="status-item"><span class="label">累积偏移 (mm)</span><span id="st-corr">—</span></div>
-      <div class="status-item"><span class="label">活动 CSV</span><span id="st-csv">—</span></div>
-      <div class="status-item"><span class="label">数据用量</span><span id="st-usage">—</span></div>
+    <!-- 仪表组：六轴力/力矩（带符号微条规）+ 倍率 + 偏移 + 标定/数据 -->
+    <section class="cluster" aria-label="实时六轴力仪表">
+      <div class="gauge">
+        <h2>TCP 力 <small>N · 满 ±160</small></h2>
+        <div class="axis-list" id="gauge-force"></div>
+      </div>
+      <div class="gauge">
+        <h2>TCP 力矩 <small>N·m · 满 ±8</small></h2>
+        <div class="axis-list" id="gauge-torque"></div>
+      </div>
+      <div class="dials">
+        <div class="dial">
+          <h2>OV_PRO</h2>
+          <div class="dial-value" id="dial-ov">—</div>
+          <div class="dial-sub">程序倍率 %</div>
+        </div>
+        <div class="dial">
+          <h2>累积偏移</h2>
+          <div class="dial-value compact" id="dial-corr">—</div>
+          <div class="dial-sub">工具系 mm</div>
+        </div>
+        <div class="dial">
+          <h2>标定样本</h2>
+          <div class="dial-value compact" id="dial-calib">—</div>
+          <div class="dial-sub" id="dial-calib-sub">—</div>
+        </div>
+        <div class="dial">
+          <h2>数据盘</h2>
+          <div class="dial-value compact" id="dial-disk">—</div>
+          <div class="dial-sub ellip" id="dial-csv">—</div>
+        </div>
+      </div>
+    </section>
+
+    <div class="bench-grid">
+      <div class="scope-col">
+        <section class="panel">
+          <h2>接触力 Fx / Fy / Fz</h2>
+          <div class="chart-box tall"><canvas id="chart-force"></canvas></div>
+        </section>
+        <section class="panel">
+          <h2>力矩 Mx / My / Mz</h2>
+          <div class="chart-box mid"><canvas id="chart-torque"></canvas></div>
+        </section>
+        <section class="panel">
+          <h2>程序倍率 OV_PRO</h2>
+          <div class="chart-box low"><canvas id="chart-ovpro"></canvas></div>
+        </section>
+      </div>
+
+      <aside class="rail">
+        <section class="panel">
+          <h2>凿击让位参数</h2>
+          <form class="param-form" id="force-config-form" autocomplete="off">
+            <label>目标力 N<input type="number" id="fc-default_target_force_n" step="1" min="0" max="150"></label>
+            <label>让位阈值 N<input type="number" id="fc-chisel_lateral_deadband_n" step="1" min="0" max="100"></label>
+            <label>行程上限 mm<input type="number" id="fc-chisel_lateral_max_mm" step="0.5" min="0.5" max="20"></label>
+            <label>卡滞保护 N<input type="number" id="fc-chisel_lateral_trip_n" step="5" min="20" max="200"></label>
+            <label>让位增益 mm/s/N<input type="number" id="fc-chisel_lateral_gain_mm_per_s_per_n" step="0.01" min="0.001" max="1"></label>
+            <label>让位方向
+              <select id="fc-chisel_lateral_sign">
+                <option value="1">与读数同号（默认）</option>
+                <option value="-1">与读数反号</option>
+              </select>
+            </label>
+            <div class="param-actions">
+              <button type="button" class="btn primary" id="force-config-save">保存参数</button>
+              <span class="param-info" id="force-config-info"></span>
+            </div>
+          </form>
+          <p class="footnote">凿击中横向力超过阈值时，机械臂顺势让位卸载（最多让位行程上限）；卡滞超阈值沿 -X 退刀。方向符号须实机手推批头实测后再改。</p>
+        </section>
+
+        <section class="panel">
+          <h2>事件流</h2>
+          <ul id="event-list" class="event-log" aria-live="polite"></ul>
+        </section>
+      </aside>
     </div>
-    <div class="wrench-row">
-      <span class="label">TCP 力 (N)：</span><span id="st-tcp-f">—</span>
-      <span class="label">TCP 力矩 (N·m)：</span><span id="st-tcp-m">—</span>
-    </div>
-  </section>
 
-  <!-- 实时曲线（SSE 驱动，60s 滑动窗口） -->
-  <section class="panel">
-    <h2>实时曲线（最近 60 秒）</h2>
-    <div class="charts-row">
-      <div class="chart-box"><h3>TCP 力 (N)</h3><canvas id="chart-force"></canvas></div>
-      <div class="chart-box"><h3>TCP 力矩 (N·m)</h3><canvas id="chart-torque"></canvas></div>
-      <div class="chart-box"><h3>OV_PRO (%)</h3><canvas id="chart-ovpro"></canvas></div>
-    </div>
-  </section>
+    <section class="panel">
+      <h2>历史回放</h2>
+      <div class="history-controls">
+        <label>文件 <select id="history-file"></select></label>
+        <label>开始 <input type="datetime-local" id="history-start" step="1"></label>
+        <label>结束 <input type="datetime-local" id="history-end" step="1"></label>
+        <button type="button" class="btn" id="history-load">加载曲线</button>
+        <span class="history-info" id="history-info"></span>
+      </div>
+      <div class="chart-box replay"><canvas id="chart-history"></canvas></div>
+    </section>
 
-  <!-- 事件流 -->
-  <section class="panel">
-    <h2>事件流</h2>
-    <ul id="event-list" class="event-list"></ul>
-  </section>
+    <section class="panel">
+      <h2>数据文件</h2>
+      <table class="file-table" id="file-table">
+        <thead>
+          <tr><th>名称</th><th>大小</th><th>修改时间</th><th>状态</th><th>操作</th></tr>
+        </thead>
+        <tbody id="file-tbody"></tbody>
+      </table>
+    </section>
 
-  <!-- 历史回放 -->
-  <section class="panel">
-    <h2>历史回放</h2>
-    <div class="history-controls">
-      <label>文件：<select id="history-file"></select></label>
-      <label>开始：<input type="datetime-local" id="history-start" step="1"></label>
-      <label>结束：<input type="datetime-local" id="history-end" step="1"></label>
-      <button id="history-load">加载曲线</button>
-      <span id="history-info"></span>
-    </div>
-    <div class="chart-box chart-wide"><canvas id="chart-history"></canvas></div>
-  </section>
-
-  <!-- 文件管理 -->
-  <section class="panel">
-    <h2>数据文件管理</h2>
-    <table class="file-table" id="file-table">
-      <thead>
-        <tr><th>名称</th><th>大小</th><th>修改时间</th><th>状态</th><th>操作</th></tr>
-      </thead>
-      <tbody id="file-tbody"></tbody>
-    </table>
-  </section>
+  </main>
 
   <script src="/static/vendor/chart.umd.min.js"></script>
   <script src="/static/app.js"></script>

@@ -1,169 +1,471 @@
-/* KUKA RSI 监控台样式：深色工业风 */
+/* ============================================================
+   KUKA RSI 力控监控台 —— 机床仪表台（instrument bench）
+   字体：数字/标识 Bahnschrift（DIN 1451 德标工业字体，Windows 自带），
+         中文回退微软雅黑/思源黑体；事件时间戳 Cascadia Mono。
+   颜色：碳灰机身分层 + KUKA 橙（只给"活的"：品牌、运行灯、主按钮、
+         周期脉冲）；状态灯走机床惯例 绿/琥珀/红；曲线通道走示波器惯例。
+   ============================================================ */
+
+:root {
+  --bg: #0F1317;        /* 机身底 */
+  --panel: #161C22;     /* 面板 */
+  --panel-2: #1C242C;   /* 面板抬起一档 */
+  --line: #2A3541;      /* 发丝线 */
+  --ink: #E9EEF3;       /* 主文字 */
+  --ink-2: #A9B6C2;     /* 次文字 */
+  --ink-3: #7E8C9A;     /* 弱文字 */
+  --kuka: #FF6A00;      /* KUKA 橙：品牌/运行/主按钮/周期脉冲 */
+  --kuka-deep: #D55700;
+  --run: #3ECF6E;       /* 运行绿 */
+  --warn: #FFB224;      /* 警示琥珀 */
+  --trip: #FF5252;      /* 报警红 */
+  --ch-fx: #FFD75E;     /* 示波器通道：力 */
+  --ch-fy: #46D6E8;
+  --ch-fz: #B48CFF;
+  --ch-mx: #7BE0A2;     /* 示波器通道：力矩 */
+  --ch-my: #FF7EB5;
+  --ch-mz: #8FA9FF;
+  --num-font: "Bahnschrift", "DIN Alternate", "Arial Narrow", "Microsoft YaHei", sans-serif;
+  --ui-font: "Segoe UI", "Microsoft YaHei", "Noto Sans SC", "PingFang SC", sans-serif;
+  --mono-font: "Cascadia Mono", "Consolas", "Courier New", monospace;
+}
 
 * { box-sizing: border-box; }
 
 body {
   margin: 0;
-  padding: 0 16px 32px;
-  background: #1b1f24;
-  color: #d7dde4;
-  font-family: "Microsoft YaHei", "PingFang SC", "Segoe UI", sans-serif;
+  background: var(--bg);
+  color: var(--ink);
+  font-family: var(--ui-font);
   font-size: 14px;
+  line-height: 1.5;
 }
 
-header h1 {
-  font-size: 20px;
-  margin: 16px 0 12px;
-  color: #f0f3f6;
-}
+:focus-visible { outline: 2px solid var(--kuka); outline-offset: 1px; }
 
-.panel {
-  background: #242a31;
-  border: 1px solid #333b44;
-  border-radius: 6px;
-  padding: 12px 16px;
-  margin-bottom: 16px;
-}
+/* ---------------- 报警条（只在故障时出现） ---------------- */
 
-.panel h2 {
-  font-size: 15px;
-  margin: 0 0 10px;
-  color: #9fb2c5;
-  border-bottom: 1px solid #333b44;
-  padding-bottom: 6px;
-}
-
-.panel h3 {
-  font-size: 13px;
-  margin: 0 0 6px;
-  color: #8fa0b0;
-  font-weight: normal;
-}
-
-/* 告警横幅 */
-.alert-banner {
-  background: #7a1f1f;
-  border: 1px solid #c0392b;
-  color: #ffd7d7;
-  border-radius: 6px;
-  padding: 10px 16px;
-  margin-bottom: 16px;
-  font-weight: bold;
+.alarm-strip {
+  position: sticky;
+  top: 0;
+  z-index: 30;
+  background: var(--trip);
+  color: #FFFFFF;
+  font-weight: 700;
+  padding: 8px 20px;
+  letter-spacing: 0.02em;
 }
 
 .hidden { display: none; }
 
-/* 状态栏 */
-.status-grid {
+/* ---------------- 机床条（吸顶） ---------------- */
+
+.machine-bar {
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  gap: 28px;
+  flex-wrap: wrap;
+  padding: 10px 20px;
+  background: rgba(15, 19, 23, 0.96);
+  border-bottom: 1px solid var(--line);
+  backdrop-filter: blur(4px);
+}
+
+/* 报警条在场时机床条让位到它下方 */
+.alarm-strip + .machine-bar { top: 37px; }
+
+.brand { display: flex; align-items: center; gap: 12px; }
+
+.brand-plate {
+  width: 22px;
+  height: 22px;
+  background: var(--kuka);
+  box-shadow: inset 0 0 0 2px var(--bg), inset 0 0 0 3px var(--kuka);
+  flex: none;
+}
+
+.brand-text h1 {
+  margin: 0;
+  font-family: var(--num-font);
+  font-size: 19px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  color: var(--ink);
+}
+
+.brand-text span {
+  display: block;
+  font-size: 11px;
+  color: var(--ink-3);
+  margin-top: 1px;
+}
+
+.lamps { display: flex; gap: 20px; flex-wrap: wrap; }
+
+.lamp { display: inline-flex; align-items: center; gap: 7px; }
+
+.lamp i {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: #39424D;          /* 灯灭 */
+  flex: none;
+  transition: background 0.25s, box-shadow 0.25s;
+}
+
+.lamp b { font-weight: 400; color: var(--ink-3); font-size: 12px; }
+.lamp em { font-style: normal; color: var(--ink-2); font-size: 12px; }
+
+.lamp.on-run i { background: var(--run); box-shadow: 0 0 6px rgba(62, 207, 110, 0.7); }
+.lamp.on-run em { color: var(--run); }
+.lamp.on-kuka i { background: var(--kuka); box-shadow: 0 0 6px rgba(255, 106, 0, 0.7); }
+.lamp.on-kuka em { color: var(--kuka); }
+.lamp.on-warn i { background: var(--warn); box-shadow: 0 0 6px rgba(255, 178, 36, 0.7); }
+.lamp.on-warn em { color: var(--warn); }
+.lamp.on-trip i { background: var(--trip); box-shadow: 0 0 6px rgba(255, 82, 82, 0.8); }
+.lamp.on-trip em { color: var(--trip); }
+
+.cycle { margin-left: auto; display: flex; align-items: center; gap: 8px; }
+
+.cycle-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #39424D;
+  transition: background 0.08s;
+}
+
+.cycle-dot.lit { background: var(--kuka); box-shadow: 0 0 8px rgba(255, 106, 0, 0.9); }
+
+.cycle-text {
+  font-family: var(--num-font);
+  font-size: 12px;
+  letter-spacing: 0.08em;
+  color: var(--ink-3);
+}
+
+/* ---------------- 台面布局 ---------------- */
+
+.bench {
+  max-width: 1480px;
+  margin: 0 auto;
+  padding: 16px 20px 40px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 12px 16px 14px;
+}
+
+.panel h2 {
+  margin: 0 0 10px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ink-2);
+  border-bottom: 1px solid var(--line);
+  padding-bottom: 7px;
+}
+
+.panel h2 small { color: var(--ink-3); font-weight: 400; margin-left: 4px; }
+
+/* ---------------- 仪表组（签名元素） ---------------- */
+
+.cluster {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
-  gap: 8px 16px;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1.08fr);
+  gap: 14px;
 }
 
-.status-item .label { color: #8fa0b0; margin-right: 8px; }
-
-.good { color: #3cb44b; font-weight: bold; }
-.bad { color: #ff5b5b; font-weight: bold; }
-
-.wrench-row {
-  margin-top: 10px;
-  padding-top: 8px;
-  border-top: 1px dashed #333b44;
+.gauge, .dials {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 12px 16px 14px;
 }
 
-.wrench-row .label { color: #8fa0b0; margin-left: 16px; }
-.wrench-row .label:first-child { margin-left: 0; }
+.axis-list { display: flex; flex-direction: column; gap: 9px; }
 
-/* 实时曲线 */
-.charts-row {
+.axis { display: grid; grid-template-columns: 26px 84px 1fr; align-items: center; gap: 10px; }
+
+.axis-name { font-size: 12px; color: var(--ink-3); }
+
+.axis-val {
+  font-family: var(--num-font);
+  font-variant-numeric: tabular-nums;
+  font-size: 19px;
+  font-weight: 600;
+  color: var(--ink);
+  text-align: right;
+  white-space: nowrap;
+}
+
+/* 带符号微条规：中线为零，向左右伸出；两端刻度线标出满量程 */
+.axis-track {
+  position: relative;
+  height: 7px;
+  background: #10151A;
+  border-radius: 2px;
+  box-shadow: inset 0 0 0 1px #212A33;
+}
+
+.axis-track::before,
+.axis-track::after {
+  content: "";
+  position: absolute;
+  top: -2px;
+  bottom: -2px;
+  width: 1px;
+  background: var(--ink-3);
+}
+
+.axis-track::before { left: 0; }
+.axis-track::after { right: 0; }
+
+.axis-zero {
+  position: absolute;
+  left: 50%;
+  top: -1px;
+  bottom: -1px;
+  width: 1px;
+  background: var(--ink-3);
+}
+
+.axis-fill {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  border-radius: 1px;
+}
+
+.dials {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
-  gap: 12px;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px 18px;
+  align-content: start;
 }
+
+.dial h2, .gauge h2 {
+  margin: 0 0 8px;
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--ink-3);
+  border: none;
+  padding: 0;
+}
+
+.dial-value {
+  font-family: var(--num-font);
+  font-variant-numeric: tabular-nums;
+  font-size: 30px;
+  font-weight: 700;
+  line-height: 1.1;
+  color: var(--ink);
+  white-space: nowrap;
+}
+
+.dial-value.compact { font-size: 16px; font-weight: 600; line-height: 1.7; }
+
+.dial-sub { font-size: 11px; color: #8B99A6; margin-top: 2px; }
+
+.ellip { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* ---------------- 示波区 + 右轨 ---------------- */
+
+.bench-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 380px;
+  gap: 14px;
+  align-items: start;
+}
+
+.scope-col { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
+
+.rail { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
 
 .chart-box {
-  background: #1b1f24;
-  border: 1px solid #2c333b;
-  border-radius: 4px;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 3px;
   padding: 8px;
-  height: 240px;
 }
 
-.chart-wide {
-  height: 320px;
-  margin-top: 10px;
+.chart-box.tall { height: 300px; }
+.chart-box.mid { height: 210px; }
+.chart-box.low { height: 150px; }
+.chart-box.replay { height: 330px; margin-top: 10px; }
+
+.chart-box canvas { width: 100% !important; height: calc(100% - 22px) !important; }
+
+/* ---------------- 凿击参数表单 ---------------- */
+
+.param-form { display: grid; grid-template-columns: 1fr 1fr; gap: 10px 12px; }
+
+.param-form label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--ink-2);
 }
 
-.chart-box canvas { width: 100% !important; height: calc(100% - 24px) !important; }
-.chart-wide canvas { height: 100% !important; }
+.param-form input, .param-form select {
+  width: 100%;
+  background: var(--bg);
+  color: var(--ink);
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  padding: 5px 8px;
+  font-size: 13px;
+  font-family: var(--num-font);
+  font-variant-numeric: tabular-nums;
+}
 
-/* 事件流 */
-.event-list {
+.param-form input:focus, .param-form select:focus { border-color: var(--kuka); outline: none; }
+
+.param-actions {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 2px;
+}
+
+.param-info { font-size: 12px; color: var(--ink-3); }
+
+.footnote {
+  margin: 12px 0 0;
+  padding-top: 10px;
+  border-top: 1px dashed var(--line);
+  font-size: 12px;
+  color: var(--ink-3);
+  line-height: 1.6;
+}
+
+/* ---------------- 事件流 ---------------- */
+
+.event-log {
   list-style: none;
   margin: 0;
   padding: 0;
-  max-height: 240px;
+  max-height: 380px;
   overflow-y: auto;
-  font-family: Consolas, "Courier New", monospace;
   font-size: 12px;
 }
 
-.event-list li { padding: 2px 4px; border-bottom: 1px solid #262c33; }
-.event-list li.event-info { color: #9fb2c5; }
-.event-list li.event-warning { color: #f5b942; }
-.event-list li.event-error { color: #ff5b5b; }
+.event-log li {
+  display: grid;
+  grid-template-columns: 62px 1fr;
+  gap: 10px;
+  padding: 4px 2px;
+  border-bottom: 1px solid #202832;
+  color: var(--ink-2);
+}
 
-/* 历史回放 */
+.event-log time { font-family: var(--mono-font); color: #8B99A6; font-size: 11px; line-height: 1.7; }
+
+.event-log li.event-warning { color: var(--warn); }
+.event-log li.event-error { color: var(--trip); }
+.event-log li.event-info { color: var(--ink-2); }
+
+/* ---------------- 历史回放 ---------------- */
+
 .history-controls {
   display: flex;
   flex-wrap: wrap;
-  gap: 10px;
+  gap: 10px 16px;
   align-items: center;
+  font-size: 13px;
+  color: var(--ink-2);
 }
 
-.history-controls label { color: #8fa0b0; }
+.history-controls label { display: inline-flex; align-items: center; gap: 8px; }
+
+.history-info { color: var(--ink-3); font-size: 12px; }
+
+/* ---------------- 通用控件 ---------------- */
 
 select, input, button {
-  background: #1b1f24;
-  color: #d7dde4;
-  border: 1px solid #3a434d;
-  border-radius: 4px;
+  background: var(--bg);
+  color: var(--ink);
+  border: 1px solid var(--line);
+  border-radius: 3px;
   padding: 4px 8px;
   font-size: 13px;
+  font-family: var(--ui-font);
+  color-scheme: dark;   /* 原生下拉/日历弹层跟随深色 */
 }
+
+input[type="datetime-local"] { color-scheme: dark; }
 
 button, .btn {
   cursor: pointer;
   text-decoration: none;
   display: inline-block;
-  background: #2c3640;
-  color: #d7dde4;
-  border: 1px solid #3a434d;
-  border-radius: 4px;
-  padding: 4px 10px;
+  background: transparent;
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  padding: 5px 12px;
   font-size: 13px;
-  margin-right: 6px;
+  color: var(--ink);
+  margin-right: 4px;
 }
 
-button:hover, .btn:hover { background: #3a4653; }
+button:hover, .btn:hover { background: var(--panel-2); border-color: var(--ink-3); }
 
-.btn-danger { border-color: #7a3030; color: #ff8a8a; }
-.btn-danger:hover { background: #4a2525; }
-.btn-danger:disabled { opacity: 0.4; cursor: not-allowed; }
-
-/* 文件表格 */
-.file-table {
-  width: 100%;
-  border-collapse: collapse;
-  font-size: 13px;
+.btn.primary {
+  background: var(--kuka);
+  border-color: var(--kuka);
+  color: #16100A;
+  font-weight: 600;
 }
+
+.btn.primary:hover { background: var(--kuka-deep); border-color: var(--kuka-deep); }
+
+.btn-danger { border-color: #6B2B2B; color: #FF8A8A; }
+.btn-danger:hover { background: #3A1D1D; border-color: #8A3737; }
+.btn-danger:disabled { opacity: 0.35; cursor: not-allowed; }
+
+/* ---------------- 文件表 ---------------- */
+
+.file-table { width: 100%; border-collapse: collapse; font-size: 13px; }
 
 .file-table th, .file-table td {
   text-align: left;
-  padding: 6px 10px;
-  border-bottom: 1px solid #2c333b;
+  padding: 7px 10px;
+  border-bottom: 1px solid #202832;
 }
 
-.file-table th { color: #8fa0b0; font-weight: normal; }
+.file-table th { color: var(--ink-3); font-weight: 400; font-size: 12px; }
 
-.file-table tr:hover td { background: #262d35; }
+.file-table tbody tr:hover td { background: var(--panel-2); }
+
+.file-table .empty { color: var(--ink-3); text-align: center; padding: 22px 0; }
+
+/* ---------------- 响应式 ---------------- */
+
+@media (max-width: 1180px) {
+  .bench-grid { grid-template-columns: 1fr; }
+  .cluster { grid-template-columns: 1fr 1fr; }
+  .dials { grid-column: 1 / -1; grid-template-columns: repeat(4, 1fr); }
+}
+
+@media (max-width: 760px) {
+  .cluster { grid-template-columns: 1fr; }
+  .dials { grid-template-columns: 1fr 1fr; }
+  .machine-bar { gap: 12px; }
+  .cycle { margin-left: 0; }
+  .axis { grid-template-columns: 24px 76px 1fr; }
+  .param-form { grid-template-columns: 1fr; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .lamp i, .cycle-dot { transition: none; }
+}
