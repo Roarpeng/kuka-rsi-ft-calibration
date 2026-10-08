@@ -12,6 +12,7 @@ from types import SimpleNamespace
 
 import data_manager
 import web_monitor
+from calibration_models import ForceControlConfig
 from udp_server import RSIData
 
 # ============================================================
@@ -222,11 +223,14 @@ def _make_dummy_server(data_dir: str) -> SimpleNamespace:
     )
 
 
-def _request(port: int, method: str, path: str) -> tuple[int, str, bytes]:
+def _request(
+    port: int, method: str, path: str, body: bytes | None = None
+) -> tuple[int, str, bytes]:
     """发一次 HTTP 请求，返回 (状态码, Content-Type, body)。"""
     conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
     try:
-        conn.request(method, path)
+        headers = {"Content-Type": "application/json"} if body is not None else {}
+        conn.request(method, path, body=body, headers=headers)
         resp = conn.getresponse()
         return resp.status, resp.getheader("Content-Type") or "", resp.read()
     finally:
@@ -366,6 +370,86 @@ def test_web_monitor() -> None:
     print("web_monitor 集成测试 OK")
 
 
+def _post_json(port: int, path: str, payload: object) -> tuple[int, dict]:
+    body = json.dumps(payload).encode("utf-8")
+    status, _, raw = _request(port, "POST", path, body=body)
+    return status, json.loads(raw.decode("utf-8"))
+
+
+def test_force_config_api() -> None:
+    """/api/force_config：白名单读写 + 实时生效 + 落盘 + 非法输入拒绝。"""
+    with tempfile.TemporaryDirectory() as d:
+        force_config = ForceControlConfig()
+        dummy = _make_dummy_server(d)
+        dummy.calibration_config.force_control = force_config  # type: ignore[attr-defined]
+        config_path = os.path.join(d, "ft_calibration_config.json")
+
+        monitor = web_monitor.start_web_server(
+            dummy, data_dir=d, port=0, host="127.0.0.1",
+            force_config_path=config_path,
+        )
+        port = monitor.port
+        try:
+            # GET：返回白名单字段的实时值
+            status, payload = _get_json(port, "/api/force_config")
+            assert status == 200
+            for key in web_monitor.FORCE_CONFIG_FIELDS:
+                assert key in payload["force_control"], f"GET 缺少字段 {key}"
+            assert payload["force_control"]["chisel_lateral_deadband_n"] == 15.0
+
+            # POST 合法值：实时生效 + 写入配置文件
+            status, payload = _post_json(
+                port, "/api/force_config",
+                {"chisel_lateral_deadband_n": 20.0, "chisel_lateral_max_mm": 12.5},
+            )
+            assert status == 200 and payload["ok"] is True
+            assert force_config.chisel_lateral_deadband_n == 20.0
+            assert force_config.chisel_lateral_max_mm == 12.5
+            with open(config_path, encoding="utf-8") as f:
+                on_disk = json.load(f)
+            assert on_disk["force_control"]["chisel_lateral_deadband_n"] == 20.0
+            assert on_disk["force_control"]["chisel_lateral_max_mm"] == 12.5
+
+            # 事件流有更新记录
+            status, payload = _get_json(port, "/api/events?limit=20")
+            assert any("已更新力控参数" in e["message"] for e in payload["events"])
+
+            # 非法输入全部 400：白名单外 / 超范围 / 符号 0 / 空对象 / 坏 JSON / 空体
+            for bad in (
+                {"axis": "Z"},
+                {"chisel_lateral_max_mm": 50.0},
+                {"chisel_lateral_sign": 0},
+                {},
+            ):
+                status, payload = _post_json(port, "/api/force_config", bad)
+                assert status == 400, f"{bad} 应被拒绝: {status}"
+                assert "error" in payload
+            status, _, _ = _request(
+                port, "POST", "/api/force_config", body=b"{not json"
+            )
+            assert status == 400
+            status, _, _ = _request(port, "POST", "/api/force_config")
+            assert status == 400
+            # 合法值未被非法请求破坏
+            assert force_config.chisel_lateral_deadband_n == 20.0
+
+            # 力控配置不可用 -> 409
+            original_server = monitor.server
+            monitor.server = SimpleNamespace(calibration_config=None)
+            try:
+                status, _ = _get_json(port, "/api/force_config")
+                assert status == 409
+                status, _ = _post_json(port, "/api/force_config", {"default_target_force_n": 60})
+                assert status == 409
+            finally:
+                monitor.server = original_server
+        finally:
+            monitor.shutdown()
+            monitor._http_thread.join(timeout=2)
+            monitor._capacity_thread.join(timeout=2)
+    print("force_config API 集成测试 OK")
+
+
 if __name__ == "__main__":
     test_whitelist()
     test_list_files()
@@ -373,4 +457,5 @@ if __name__ == "__main__":
     test_enforce_capacity()
     test_read_series()
     test_web_monitor()
+    test_force_config_api()
     print("\nWeb 监控层测试全部通过")

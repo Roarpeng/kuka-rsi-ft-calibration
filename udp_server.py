@@ -68,7 +68,7 @@ class RSIData:
     iPOC: int = 0
     ipoc_text: str = "0"
     data_collection: bool = False  # 标定采样触发：true 采集，false 不采集
-    RobotStatus: bool = False      # FALSE=钻孔（控 $OV_PRO）；TRUE=凿击（位移后续再做）
+    RobotStatus: bool = False      # FALSE=钻孔（控 $OV_PRO）；TRUE=凿击（X 恒力 OV_PRO + Y/Z 横向让位）
     target_force: float = 0.0      # 力控目标力（可选 XML；未带则用配置默认值）
     target_force_present: bool = False  # RSI XML 是否带了 <target_force>；未带则用配置默认值
     sensor_fx: float = 0.0
@@ -141,7 +141,7 @@ class RSIServer:
         ("Act_B", "DOUBLE", 11),
         ("Act_C", "DOUBLE", 12),
         ("data_collection", "BOOL", 13),
-        ("RobotStatus", "BOOL", 14),  # FALSE=钻孔控倍率；TRUE=凿击（位移后续）
+        ("RobotStatus", "BOOL", 14),  # FALSE=钻孔控倍率；TRUE=凿击（X 恒力 + Y/Z 横向让位）
     ]
 
     # 对应机器人 RSI XML 的 RECEIVE/ELEMENTS（上位机 -> 机器人）
@@ -829,7 +829,7 @@ def create_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--force",
         action="store_true",
-        help="启动力控模式：重力补偿 + 恒力钻孔（RobotStatus=FALSE 控 OV_PRO；TRUE 凿击后续）"
+        help="启动力控模式：重力补偿 + 恒力钻孔（RobotStatus=FALSE 控 OV_PRO；TRUE 凿击横向让位）"
     )
     parser.add_argument(
         "--ip",
@@ -938,7 +938,8 @@ def main():
         print(f"力滤波：中值 {fc.filter_median_window} 帧 + 低通 {fc.filter_lpf_hz} Hz")
         print(f"路径进给补偿：{fc.path_feed_mm_s} mm/s（须与 $VEL.CP 一致）")
         print(f"限幅：每拍增量 ±{fc.per_cycle_max_mm} mm（PosCorr），累积 ±{fc.cumulative_max_mm} mm（POSCORRMON），超力保护 {fc.max_force_n} N")
-        print(f"倍率：RobotStatus=FALSE 钻孔按力映射 $OV_PRO 0–100%（每拍 ≤{fc.ov_pro_slew_pct:.1f}%）；TRUE 凿击位移尚未启用，回发默认 {fc.default_ov_pro:.0f}%")
+        print(f"倍率：RobotStatus=FALSE 钻孔按力映射 $OV_PRO 0–100%（每拍 ≤{fc.ov_pro_slew_pct:.1f}%）")
+        print(f"凿击（TRUE）：X 仍 OV_PRO 恒力；Y/Z 横向让位阈值 {fc.chisel_lateral_deadband_n} N、行程 ±{fc.chisel_lateral_max_mm} mm、卡滞保护 {fc.chisel_lateral_trip_n} N、方向符号 {fc.chisel_lateral_sign:+d}（横向调节期间 X 恒力冻结）")
         print("RSI 回包：钻孔 RKorr=0 + OV_PRO（须 RSI_ON(#RELATIVE)；Ethernet Out7→Map2OV_PRO 量程 0–100）\n")
     else:
         calibration_config.mode = "record_only"

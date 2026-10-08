@@ -21,6 +21,23 @@ def _write_json(path: Path, payload: dict[str, Any]):
         json.dump(payload, handle, indent=2, ensure_ascii=False)
 
 
+def _dump_config_compact_arrays(payload: dict[str, Any]) -> str:
+    """配置文件序列化：2 空格缩进，数组保持单行（与仓库手工格式一致，便于 diff）。"""
+    def fmt(value: Any, indent: int) -> str:
+        pad = "  " * indent
+        if isinstance(value, dict):
+            if not value:
+                return "{}"
+            inner = ",\n".join(
+                f"{pad}  {json.dumps(str(k), ensure_ascii=False)}: {fmt(v, indent + 1)}"
+                for k, v in value.items()
+            )
+            return "{\n" + inner + "\n" + pad + "}"
+        return json.dumps(value, ensure_ascii=False)
+
+    return fmt(payload, 0) + "\n"
+
+
 def _parse_transform(payload: dict[str, Any]) -> EulerTransform:
     return EulerTransform(
         translation_m=list(payload.get("translation_m", [0.0, 0.0, 0.0])),
@@ -92,6 +109,17 @@ def _parse_force_control(payload: dict[str, Any]) -> ForceControlConfig:
         cycle_s=float(payload.get("cycle_s", defaults.cycle_s)),
         default_ov_pro=float(payload.get("default_ov_pro", defaults.default_ov_pro)),
         ov_pro_slew_pct=float(payload.get("ov_pro_slew_pct", defaults.ov_pro_slew_pct)),
+        chisel_lateral_deadband_n=float(payload.get("chisel_lateral_deadband_n", defaults.chisel_lateral_deadband_n)),
+        chisel_lateral_gain_mm_per_s_per_n=float(payload.get(
+            "chisel_lateral_gain_mm_per_s_per_n", defaults.chisel_lateral_gain_mm_per_s_per_n
+        )),
+        chisel_lateral_max_mm=float(payload.get("chisel_lateral_max_mm", defaults.chisel_lateral_max_mm)),
+        chisel_lateral_trip_n=float(payload.get("chisel_lateral_trip_n", defaults.chisel_lateral_trip_n)),
+        chisel_lateral_sign=int(payload.get("chisel_lateral_sign", defaults.chisel_lateral_sign)),
+        chisel_lateral_median_window=int(payload.get(
+            "chisel_lateral_median_window", defaults.chisel_lateral_median_window
+        )),
+        chisel_lateral_lpf_hz=float(payload.get("chisel_lateral_lpf_hz", defaults.chisel_lateral_lpf_hz)),
     )
 
 
@@ -111,6 +139,26 @@ def load_config(path: str | Path = DEFAULT_CONFIG_PATH) -> CalibrationConfig:
         force_control=_parse_force_control(payload.get("force_control", {})),
         files=_parse_files(payload.get("files", {})),
     )
+
+
+def save_force_control_updates(
+    path: str | Path, updates: dict[str, float | int]
+) -> dict[str, Any]:
+    """把若干 force_control 参数合并落盘（保留其他段落与字段），返回更新后的段。
+
+    供 Web 层 /api/force_config 持久化在线设定；键白名单与范围由调用方校验。
+    """
+    config_path = Path(path)
+    payload: dict[str, Any] = {}
+    if config_path.exists():
+        payload = _read_json(config_path)
+    section = payload.setdefault("force_control", {})
+    if not isinstance(section, dict):
+        raise ValueError("ft_calibration_config.json 的 force_control 段损坏（非对象）")
+    section.update(updates)
+    with config_path.open("w", encoding="utf-8") as handle:
+        handle.write(_dump_config_compact_arrays(payload))
+    return section
 
 
 def save_calibration_result(path: str | Path, result: CalibrationResult):

@@ -91,7 +91,9 @@ server.force_controller.reset()
 r3 = send_frames(press_n, 20, 3000, robot_status="TRUE")
 rx, ry, rz = rkorr_of(r3[-1])
 assert abs(rx) < 1e-9 and abs(ry) < 1e-9 and abs(rz) < 1e-9
-assert abs(ov_of(r3[-1]) - 100.0) < 0.1
-print("阶段3 凿击占位（TRUE）：默认倍率、RKorr=0，OK")
+ov3 = ov_of(r3[-1])
+# 凿击：X 仍恒力 -> 60N 超目标 50N，倍率应持续下降（无横向力，RKorr=0）
+assert ov3 < 100.0 - 1e-6, f"凿击 X 恒力应开始降倍率: {ov3}"
+print(f"阶段3 凿击（TRUE）：X 恒力降倍率（OV={ov3:.0f}%）、RKorr=0，OK")
 
 print("\n端到端力控链路验证通过")

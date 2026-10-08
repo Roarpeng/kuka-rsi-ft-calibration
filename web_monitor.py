@@ -1,10 +1,10 @@
 """Web 监控层：HTTP 状态查询、SSE 实时帧推送、事件流与 CSV 数据文件管理。
 
-纯标准库实现（http.server.ThreadingHTTPServer），只读监控 + 数据文件管理，
-绝不参与控制环（不回写 server 的任何控制参数）。前端为 web_static/ 下的
-无构建单页（index.html + app.js + style.css + 本地化 Chart.js）。
+纯标准库实现（http.server.ThreadingHTTPServer）：只读监控 + 数据文件管理 +
+力控参数在线设定（/api/force_config，白名单 + 范围校验，只写参数、不做控制）。
+前端为 web_static/ 下的无构建单页（index.html + app.js + style.css + 本地化 Chart.js）。
 
-对外入口：start_web_server(server, data_dir, data_cap_mb, port, host)。
+对外入口：start_web_server(server, data_dir, data_cap_mb, port, host, force_config_path)。
 """
 
 from __future__ import annotations
@@ -20,6 +20,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Optional
 from urllib.parse import parse_qs, unquote, urlparse
 
+import calibration_io
 import data_manager
 
 # 前端静态文件目录（与本模块同级的 web_static/）
@@ -35,6 +36,17 @@ CAPACITY_CHECK_INTERVAL_S = 60.0
 SSE_INTERVAL_S = 0.1
 # read_series points 参数上限
 SERIES_MAX_POINTS = 10000
+
+# 力控参数在线设定白名单：键 -> (下限, 上限, 类型, 中文名)。
+# 只开放力控闭环参数（凿击横向让位 + 默认目标力）；方向符号只允许 ±1。
+FORCE_CONFIG_FIELDS: dict[str, tuple[float, float, type, str]] = {
+    "default_target_force_n": (0.0, 150.0, float, "默认目标力 (N)"),
+    "chisel_lateral_deadband_n": (0.0, 100.0, float, "横向让位启动阈值 (N)"),
+    "chisel_lateral_gain_mm_per_s_per_n": (0.001, 1.0, float, "横向让位增益 (mm/s/N)"),
+    "chisel_lateral_max_mm": (0.5, 20.0, float, "横向让位行程上限 (mm)"),
+    "chisel_lateral_trip_n": (20.0, 200.0, float, "横向卡滞保护阈值 (N)"),
+    "chisel_lateral_sign": (-1.0, 1.0, int, "横向让位方向符号"),
+}
 
 # 常见静态文件 Content-Type
 _CONTENT_TYPES = {
@@ -83,12 +95,14 @@ class WebMonitor:
         data_cap_mb: int = 2048,
         port: int = 8080,
         host: str = "0.0.0.0",
+        force_config_path: str = "ft_calibration_config.json",
     ):
         self.server = server
         self.data_dir = data_dir
         self.data_cap_bytes = data_cap_mb * 1024 * 1024
         self.host = host
         self.requested_port = port
+        self.force_config_path = force_config_path  # /api/force_config 持久化目标
 
         self.events: collections.deque[dict] = collections.deque(maxlen=EVENT_BUFFER_SIZE)
         self.frames: collections.deque[dict] = collections.deque(maxlen=FRAME_BUFFER_SIZE)
@@ -231,6 +245,7 @@ class WebMonitor:
                 "corr_cumulative_mm": list(controller.corr_cumulative_mm),
                 "ov_pro_pct": controller.ov_pro_pct,
                 "status_line": controller.status_line,
+                "chisel_lateral_active": bool(getattr(controller, "chisel_lateral_active", False)),
             }
         else:
             force = None
@@ -345,6 +360,9 @@ class WebMonitor:
                 if path == "/api/status":
                     self._send_json(monitor.build_status())
                     return
+                if path == "/api/force_config":
+                    self._handle_force_config_get()
+                    return
                 if path == "/api/stream":
                     self._handle_sse()
                     return
@@ -364,6 +382,9 @@ class WebMonitor:
             def do_POST(self) -> None:  # noqa: N802
                 parsed = urlparse(self.path)
                 path = parsed.path
+                if path == "/api/force_config":
+                    self._handle_force_config_post()
+                    return
                 if path.startswith("/api/files/"):
                     rest = unquote(path[len("/api/files/"):])
                     for action in ("delete", "lock", "unlock"):
@@ -460,6 +481,95 @@ class WebMonitor:
                     return
                 self._send_json(result)
 
+            def _live_force_config(self) -> Optional[Any]:
+                """server 上当前生效的 ForceControlConfig（与力控器共享同一对象）。"""
+                calib_cfg = getattr(monitor.server, "calibration_config", None)
+                return getattr(calib_cfg, "force_control", None)
+
+            def _force_config_payload(self, fc: Any) -> dict:
+                return {"force_control": {key: getattr(fc, key) for key in FORCE_CONFIG_FIELDS}}
+
+            def _handle_force_config_get(self) -> None:
+                fc = self._live_force_config()
+                if fc is None:
+                    self._send_error_json(HTTPStatus.CONFLICT, "力控配置不可用（服务未加载 calibration_config）")
+                    return
+                self._send_json(self._force_config_payload(fc))
+
+            def _handle_force_config_post(self) -> None:
+                # 先把请求体读完再应答：未读数据会导致关闭时 RST（Windows 10053），
+                # 客户端可能收不到已写入的响应
+                try:
+                    length = int(self.headers.get("Content-Length") or 0)
+                except ValueError:
+                    length = 0
+                body = b""
+                if length > 0:
+                    if length > 4096:
+                        remaining = length
+                        while remaining > 0:  # 丢弃超大请求体
+                            chunk = self.rfile.read(min(remaining, 4096))
+                            if not chunk:
+                                break
+                            remaining -= len(chunk)
+                        self._send_error_json(HTTPStatus.BAD_REQUEST, "请求体过大")
+                        return
+                    body = self.rfile.read(length)
+                fc = self._live_force_config()
+                if fc is None:
+                    self._send_error_json(HTTPStatus.CONFLICT, "力控配置不可用（服务未加载 calibration_config）")
+                    return
+                try:
+                    updates = json.loads(body.decode("utf-8"))
+                except (UnicodeDecodeError, json.JSONDecodeError):
+                    self._send_error_json(HTTPStatus.BAD_REQUEST, "JSON 解析失败")
+                    return
+                if not isinstance(updates, dict) or not updates:
+                    self._send_error_json(HTTPStatus.BAD_REQUEST, "请求体须为非空 JSON 对象")
+                    return
+                unknown = [k for k in updates if k not in FORCE_CONFIG_FIELDS]
+                if unknown:
+                    self._send_error_json(
+                        HTTPStatus.BAD_REQUEST, f"不在白名单的参数：{', '.join(unknown)}"
+                    )
+                    return
+                cleaned: dict[str, float | int] = {}
+                for key, value in updates.items():
+                    if isinstance(value, bool):
+                        self._send_error_json(HTTPStatus.BAD_REQUEST, f"{key} 须为数值")
+                        return
+                    low, high, cast, _ = FORCE_CONFIG_FIELDS[key]
+                    try:
+                        typed = cast(value)
+                    except (TypeError, ValueError):
+                        self._send_error_json(HTTPStatus.BAD_REQUEST, f"{key} 须为数值")
+                        return
+                    if key == "chisel_lateral_sign" and typed == 0:
+                        self._send_error_json(HTTPStatus.BAD_REQUEST, "chisel_lateral_sign 只允许 1 或 -1")
+                        return
+                    if not low <= typed <= high:
+                        self._send_error_json(
+                            HTTPStatus.BAD_REQUEST, f"{key}={value} 超出范围 [{low}, {high}]"
+                        )
+                        return
+                    cleaned[key] = typed
+                with monitor.lock:
+                    for key, value in cleaned.items():
+                        setattr(fc, key, value)
+                    try:
+                        calibration_io.save_force_control_updates(
+                            monitor.force_config_path, cleaned
+                        )
+                    except (OSError, ValueError) as error:
+                        self._send_error_json(
+                            HTTPStatus.INTERNAL_SERVER_ERROR, f"配置落盘失败：{error}"
+                        )
+                        return
+                monitor.emit_event(
+                    "info", f"[Web] 已更新力控参数：{json.dumps(cleaned, ensure_ascii=False)}"
+                )
+                self._send_json({"ok": True, **self._force_config_payload(fc)})
+
             def _handle_file_action(self, name: str, action: str) -> None:
                 name = self._valid_name_or_400(name)
                 if name is None:
@@ -508,8 +618,14 @@ def start_web_server(
     data_cap_mb: int = 2048,
     port: int = 8080,
     host: str = "0.0.0.0",
+    force_config_path: str = "ft_calibration_config.json",
 ) -> WebMonitor:
     """创建并启动 Web 监控服务，返回 WebMonitor 实例。"""
     return WebMonitor(
-        server, data_dir=data_dir, data_cap_mb=data_cap_mb, port=port, host=host
+        server,
+        data_dir=data_dir,
+        data_cap_mb=data_cap_mb,
+        port=port,
+        host=host,
+        force_config_path=force_config_path,
     )

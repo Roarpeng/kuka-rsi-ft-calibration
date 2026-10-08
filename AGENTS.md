@@ -17,13 +17,13 @@
 | `calibration_io.py` | `ft_calibration_config.json`、标定结果、样本文件的读写 |
 | `calibration_math.py` | 纯数学：欧拉角→旋转矩阵、变换合成、最小二乘（高斯消元）、重力模型拟合 `fit_gravity_model`、补偿 `compensate_wrench` |
 | `calibration_runner.py` | 采样状态机：`data_collection` TRUE→FALSE 分段取均值成样，满 `min_samples` 自动求解并切到运行时补偿 |
-| `force_controller.py` | 恒力控制器 `ForceController`：每 RSI 周期调用一次 `update()`，输出本拍 RKorr 增量与 `ov_pro_pct` |
-| `test_force_control.py` | 力控闭环仿真测试（21 项断言） |
+| `force_controller.py` | 恒力控制器 `ForceController`：每 RSI 周期调用一次 `update()`，输出本拍 RKorr 增量与 `ov_pro_pct`；钻孔（drill）OV_PRO 恒力、凿击（chisel）Y/Z 横向零力让位 + X 恒力冻结、overlay 为 RKorr 位置外环测试路径 |
+| `test_force_control.py` | 力控闭环仿真测试（28 项断言，含凿击横向让位 7 项） |
 | `test_force_e2e.py` | UDP 回环端到端测试（127.0.0.1:59353，真实 `RSIServer` 全链路） |
 | `test_auto_calibrate.py` | 自动重标定测试（不起 socket，直驱 `process_frame`）：`data_collection` 上升沿自动进标定、力控挂起/恢复、`--force` 无标定待激活 |
 | `rerun_calibration.py` | 用现有样本离线重跑标定求解，与旧结果对比 |
 | `data_manager.py` | CSV 数据文件管理：白名单校验、列举、锁定/解锁、删除、容量控制 `enforce_capacity`、历史回放 `read_series`（供 Web 层调用） |
-| `web_monitor.py` | Web 监控层（纯标准库 `http.server`）：`start_web_server(server, data_dir, data_cap_mb, port)` 启动 HTTP + SSE 推送，只读监控与文件管理，**不参与控制** |
+| `web_monitor.py` | Web 监控层（纯标准库 `http.server`）：`start_web_server(server, data_dir, data_cap_mb, port, force_config_path)` 启动 HTTP + SSE 推送，只读监控与文件管理 + `/api/force_config` 力控参数在线设定（白名单+范围校验、实时生效并写回 `ft_calibration_config.json`），**不直接参与控制环** |
 | `web_static/` | 无构建单页监控台（`index.html`/`app.js`/`style.css`），图表用本地化 `vendor/chart.umd.min.js`（Chart.js 4.4.1，现场无外网，勿删） |
 | `test_web_monitor.py` | Web 层测试：data_manager 单测 + Web API 集成（dummy server + http.client） |
 | `deploy/` | Ubuntu 生产部署：`kuka-rsi.service`（systemd，开机自启 + `Restart=always`）、`install.sh`（装到 `/opt/kuka-rsi`） |
@@ -45,7 +45,7 @@ python udp_server.py --test-link      # 链路自检：XML 自检 + 回环 + 等
 python udp_server.py --ip 192.168.2.10 --host-ip 192.168.2.250 --port 59152
 ```
 
-Web 监控默认随主程序启动（`web_monitor.py`，端口 `--web-port 8080`，`--no-web` 关闭，`--data-dir`/`--data-cap-mb` 控制数据目录与容量上限）。`web_static/vendor/chart.umd.min.js` 是本地化的 Chart.js，属源码需提交。
+Web 监控默认随主程序启动（`web_monitor.py`，端口 `--web-port 8080`，`--no-web` 关闭，`--data-dir`/`--data-cap-mb` 控制数据目录与容量上限）。`web_static/vendor/chart.umd.min.js` 是本地化的 Chart.js，属源码需提交。监控台"力控参数设定"卡片（`GET/POST /api/force_config`）可在线改凿击横向让位阈值/行程上限/卡滞阈值/方向符号与默认目标力，实时生效并持久化。
 
 测试（**改动 `force_controller.py`、`udp_server.py` 或 Web 层后四个都必须通过**）：
 
@@ -88,8 +88,9 @@ Ubuntu 生产部署：`sudo bash deploy/install.sh`（装到 `/opt/kuka-rsi`，s
 - 方向约定：进给 = 工具 +X（`press_motion_sign=+1`），压紧时传感器该轴读数为负（`press_sign=-1`）。
 - `contact_threshold_n=20` 高于空载残差（5~12N 漂移）才不误判接触。
 - 收包中断 >1s 判定 RSI 重启，`udp_server.py` 自动 `ForceController.reset()`（机器人叠加归零，PC 累积须同步清零）。
-- 关 RSI 前必须先退刀让 `OV_PRO` 回到 100%，避免 `$OV_PRO` 停在 0；`RobotStatus=TRUE` 是凿击占位，不是"结束钻孔"。
+- 关 RSI 前必须先退刀让 `OV_PRO` 回到 100%，避免 `$OV_PRO` 停在 0；`RobotStatus=TRUE` 是凿击模式，不是"结束钻孔"。
 - 超力保护 `max_force_n=150` 用原始力锁存，过零不立即解锁（须连续卸荷 `trip_clear_s`）。
+- **凿击（`RobotStatus=TRUE`）横向让位**：Y/Z 对持续横向力做零力让位（慢通道滤波 + 死区 + 比例漂移）。让位方向 = `chisel_lateral_sign` × 读数方向（读数=工件对工具作用力，同号让位即背离障碍物卸载）；**符号位必须实机手推批头实测后才能改**，搞反即横向正反馈（顶墙）。死区 `chisel_lateral_deadband_n=15N` 必须高于空载残差 5~12N，否则空载慢漂。单轴让位上限 `chisel_lateral_max_mm=20mm`（Web 可设），内部仍受 80mm PosCorrMon 总限。横向原始力超 `chisel_lateral_trip_n=100N` 判卡滞：沿 -X 全速退刀并闩锁（复用超力解锁规则）。横向让位期间 X 轴恒力（OV_PRO）冻结、横向撤销后恢复；切回钻孔时横向叠加按每拍限幅缓撤到 0。
 
 ## 标定流程与模型
 
@@ -103,5 +104,5 @@ Ubuntu 生产部署：`sudo bash deploy/install.sh`（装到 `/opt/kuka-rsi`，s
 
 ## 已知未完成项
 
-- `RobotStatus=TRUE`（凿击）位移控制是占位：只回默认倍率 + RKorr=0。
+- 凿击 KRL 程序（走到位 → 置 `RobotStatus=TRUE` 击打 → 结束置 FALSE）尚未编写；PC 侧凿击横向让位控制律已就绪，等机器人侧程序接入即可联调。`chisel_lateral_sign` 上机前须手推批头实测标定。
 - `analysis_check*.py` 为一次性历史诊断脚本，不是回归测试。

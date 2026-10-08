@@ -67,6 +67,14 @@ class ForceControlConfig:
     cycle_s: float = 0.004                 # RSI 周期
     default_ov_pro: float = 100.0          # 非钻孔（凿击占位/叠加测试）时回发的 $OV_PRO（%）
     ov_pro_slew_pct: float = 2.0           # 钻孔中每拍倍率变化上限（2%/4ms）；结束钻孔时直接拉回默认
+    # ---- 凿击（RobotStatus=TRUE）：X 仍按 OV_PRO 恒力压紧；Y/Z 横向零力让位 ----
+    chisel_lateral_deadband_n: float = 15.0   # 横向让位启动阈值（N）；须高于空载残差 5~12N，否则空载慢漂
+    chisel_lateral_gain_mm_per_s_per_n: float = 0.04  # 让位速度增益：超出死区每牛 -> mm/s 漂移
+    chisel_lateral_max_mm: float = 20.0       # 横向让位行程上限（单轴累计；与 X 共享 80mm PosCorrMon 总限）
+    chisel_lateral_trip_n: float = 100.0      # 横向卡滞硬阈值（原始力锁存 -> 沿 -X 全速退刀）
+    chisel_lateral_sign: int = 1              # 让位方向 = 符号 * 读数方向；读数=工件对工具作用力，同号(+1)让位即卸载
+    chisel_lateral_median_window: int = 9     # 横向中值窗口（帧）：压掉单次凿击冲击尖峰
+    chisel_lateral_lpf_hz: float = 4.0        # 横向低通截止（Hz）：比 X 更缓，只追持续卡滞力
 
 
 @dataclass

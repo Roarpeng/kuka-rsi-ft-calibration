@@ -8,7 +8,7 @@
     "rotation_order": "ZYX"
   },
   "flange_to_tcp": {
-    "translation_m": [0.0, 0.150, 0.230],
+    "translation_m": [0.0, 0.15, 0.23],
     "rotation_deg": [0.0, 0.0, 0.0],
     "rotation_order": "ZYX"
   },
@@ -47,7 +47,7 @@
     "path_feed_mm_s": 10.0,
     "path_feed_hold_s": 0.08,
     "contact_lost_s": 0.024,
-    "trip_clear_s": 0.20,
+    "trip_clear_s": 0.2,
     "rkorr_frame": "tool",
     "filter_window": 5,
     "filter_median_window": 5,
@@ -56,7 +56,14 @@
     "max_force_n": 150.0,
     "cycle_s": 0.004,
     "default_ov_pro": 100.0,
-    "ov_pro_slew_pct": 2.0
+    "ov_pro_slew_pct": 2.0,
+    "chisel_lateral_deadband_n": 15.0,
+    "chisel_lateral_gain_mm_per_s_per_n": 0.04,
+    "chisel_lateral_max_mm": 20.0,
+    "chisel_lateral_trip_n": 100.0,
+    "chisel_lateral_sign": 1,
+    "chisel_lateral_median_window": 9,
+    "chisel_lateral_lpf_hz": 4.0
   },
   "files": {
     "calibration_path": "ft_calibration.json",

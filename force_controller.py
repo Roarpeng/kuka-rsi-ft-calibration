@@ -90,7 +90,17 @@ class ForceController:
             lpf_hz=config.filter_lpf_hz,
             cycle_s=config.cycle_s,
         )
-        self.tripped = False       # 超力保护锁存
+        # 凿击横向让位：Y/Z 各一个慢通道滤波（长中值 + 深低通，不追凿击冲击尖峰）
+        self.lateral_filters = [
+            _ForceAxisFilter(
+                median_n=max(1, config.chisel_lateral_median_window),
+                protect_n=max(1, config.filter_protect_window),
+                lpf_hz=config.chisel_lateral_lpf_hz,
+                cycle_s=config.cycle_s,
+            )
+            for _ in range(2)
+        ]
+        self.tripped = False       # 超力保护锁存（X 超限或横向卡滞）
         self.in_contact = False
         self._last_print_state: Optional[bool] = None
         self._last_path_pos_mm: Optional[list[float]] = None
@@ -103,6 +113,9 @@ class ForceController:
         self._last_press_raw: Optional[float] = None
         self._bounce_hold = 0
         self.ov_pro_pct = config.default_ov_pro
+        self.chisel_lateral_active = False  # 凿击横向让位进行中（此期间 X 恒力冻结）
+        self._last_mode: Optional[str] = None
+        self._lateral_limit_warned = False   # 横向让位到行程上限只提示一次
         # Web 监控层可选事件回调：best-effort，异常不拖垮控制环
         self.on_event: Optional[Callable[[str, str], None]] = None
 
@@ -118,6 +131,8 @@ class ForceController:
         self.integral_n_s = 0.0
         self.corr_cumulative_mm = [0.0, 0.0, 0.0]
         self.force_filter.reset()
+        for filt in self.lateral_filters:
+            filt.reset()
         self.tripped = False
         self.in_contact = False
         self._last_path_pos_mm = None
@@ -130,6 +145,9 @@ class ForceController:
         self._last_press_raw = None
         self._bounce_hold = 0
         self.ov_pro_pct = self.config.default_ov_pro
+        self.chisel_lateral_active = False
+        self._last_mode = None
+        self._lateral_limit_warned = False
 
     def _desired_ov_pro(self, press_raw: float, press_slow: float, target_force_n: float) -> float:
         """力 → $OV_PRO（0–100%）。空载满倍率接近；到目标/超力停 LIN；不能倒车。"""
@@ -173,6 +191,13 @@ class ForceController:
         cfg = self.config
         zero = {f"RKorr.{axis}": 0.0 for axis in "XYZABC"}
 
+        if mode != self._last_mode:
+            # 模式切换（钻孔<->凿击等）清横向滤波历史，避免旧模式残值串扰
+            for filt in self.lateral_filters:
+                filt.reset()
+            self._last_mode = mode
+            self._lateral_limit_warned = False
+
         f_axis_raw, f_axis_fast, f_axis_slow = self.force_filter.push(force_tcp[self.axis_index])
         press_raw = cfg.press_sign * f_axis_raw
         press_fast = cfg.press_sign * f_axis_fast
@@ -190,17 +215,47 @@ class ForceController:
             self._bounce_hold -= 1
         path_feed = self._path_feed_mm_s(tcp_position_mm, tcp_angles_deg, motion_sign)
 
+        # 凿击：推横向慢通道（Y/Z）；中值窗未填满前不让位（防冷启动单帧尖峰）
+        lat_raw = [0.0, 0.0]
+        lat_slow = [0.0, 0.0]
+        lat_ready = [False, False]
+        if mode == "chisel":
+            for i in range(2):
+                lat_raw[i], _, lat_slow[i] = self.lateral_filters[i].push(force_tcp[i + 1])
+                lat_ready[i] = len(self.lateral_filters[i].median_win) >= max(
+                    1, cfg.chisel_lateral_median_window
+                )
+
         # ---- 超力保护：用原始值立即锁存。弹跳过零不得解锁，须连续卸荷 trip_clear_s ----
         trip_clear_n = max(1, int(round(cfg.trip_clear_s / cfg.cycle_s)))
-        if abs(f_axis_raw) > cfg.max_force_n:
+        over_force = abs(f_axis_raw) > cfg.max_force_n
+        over_lateral = mode == "chisel" and (
+            abs(lat_raw[0]) > cfg.chisel_lateral_trip_n
+            or abs(lat_raw[1]) > cfg.chisel_lateral_trip_n
+        )
+        if over_force or over_lateral:
             if not self.tripped:
-                message = f"[力控] 超力保护！{cfg.axis} 轴力 {f_axis_raw:.1f} N 超过 {cfg.max_force_n:.1f} N，全速退刀"
+                if over_lateral and not over_force:
+                    message = (
+                        f"[力控] 横向卡滞保护！FY/FZ 原始力 {lat_raw[0]:.1f}/{lat_raw[1]:.1f} N"
+                        f" 超过 {cfg.chisel_lateral_trip_n:.1f} N，沿 -X 全速退刀"
+                    )
+                else:
+                    message = f"[力控] 超力保护！{cfg.axis} 轴力 {f_axis_raw:.1f} N 超过 {cfg.max_force_n:.1f} N，全速退刀"
                 print(message)
                 self._emit_event("error", message)
             self.tripped = True
             self._trip_ok_count = 0
         elif self.tripped:
-            if press_raw < cfg.contact_threshold_n and abs(f_axis_raw) < cfg.max_force_n * 0.5:
+            lateral_clear = mode != "chisel" or (
+                abs(lat_raw[0]) < cfg.chisel_lateral_trip_n * 0.5
+                and abs(lat_raw[1]) < cfg.chisel_lateral_trip_n * 0.5
+            )
+            if (
+                lateral_clear
+                and press_raw < cfg.contact_threshold_n
+                and abs(f_axis_raw) < cfg.max_force_n * 0.5
+            ):
                 self._trip_ok_count += 1
                 if self._trip_ok_count >= trip_clear_n:
                     self.tripped = False
@@ -210,21 +265,78 @@ class ForceController:
             else:
                 self._trip_ok_count = 0
 
-        # ---- 钻孔：用 $OV_PRO 控编程进给，RKorr 保持 0。凿击位移后续再做。----
+        # ---- 钻孔：用 $OV_PRO 控编程进给，RKorr 保持 0（凿击残留的横向叠加按限幅缓撤到 0）----
         if mode == "drill":
             self._slew_ov(self._desired_ov_pro(press_raw, press_slow, target_force_n))
             self._last_press_slow = press_slow
             self._last_press_raw = press_raw
             self.integral_n_s = 0.0
+            self.chisel_lateral_active = False
+            corr_unwind = [0.0, 0.0, 0.0]
+            for i in range(2):
+                axis = i + 1
+                if abs(self.corr_cumulative_mm[axis]) > 1e-9:
+                    corr_unwind[axis] = _clamp(
+                        -self.corr_cumulative_mm[axis],
+                        -cfg.per_cycle_max_mm,
+                        cfg.per_cycle_max_mm,
+                    )
+            if any(abs(step) > 1e-12 for step in corr_unwind):
+                return self._apply_correction(corr_unwind, tcp_angles_deg)
             return dict(zero)
         if mode == "chisel":
-            # 占位：不控位移、不改倍率，避免误走钻孔律
-            self.ov_pro_pct = cfg.default_ov_pro
+            # 凿击：X 仍按 OV_PRO 恒力压紧；Y/Z 横向零力让位（滑坑/卡滞时顺势卸载，
+            # 方向 = chisel_lateral_sign * 读数方向；读数=工件对工具作用力，同号让位即背离障碍物）
             self._last_press_slow = press_slow
             self._last_press_raw = press_raw
             self.integral_n_s = 0.0
-            return dict(zero)
+            if self.tripped:
+                self.chisel_lateral_active = False
+                corr_retreat = [0.0, 0.0, 0.0]
+                corr_retreat[self.axis_index] = -motion_sign * cfg.per_cycle_max_mm
+                return self._apply_correction(corr_retreat, tcp_angles_deg)
+            corr_tool = [0.0, 0.0, 0.0]
+            lateral_active = False
+            for i in range(2):
+                axis = i + 1
+                f_slow = lat_slow[i]
+                if not lat_ready[i] or abs(f_slow) <= cfg.chisel_lateral_deadband_n:
+                    continue
+                lateral_active = True
+                excess = abs(f_slow) - cfg.chisel_lateral_deadband_n
+                speed = min(cfg.chisel_lateral_gain_mm_per_s_per_n * excess, v_retreat_max)
+                step = (
+                    cfg.chisel_lateral_sign
+                    * (1.0 if f_slow > 0.0 else -1.0)
+                    * speed
+                    * cfg.cycle_s
+                )
+                # 单轴行程上限：本拍后不得越过 ±chisel_lateral_max_mm（内部另受 80mm 总限）
+                cur = self.corr_cumulative_mm[axis]
+                step = _clamp(
+                    step,
+                    -cfg.chisel_lateral_max_mm - cur,
+                    cfg.chisel_lateral_max_mm - cur,
+                )
+                if step == 0.0:
+                    if not self._lateral_limit_warned:
+                        message = (
+                            f"[力控] 横向让位到行程上限 ±{cfg.chisel_lateral_max_mm:.1f} mm，"
+                            "该轴暂停让位（横向力仍在，请检查是否卡死）"
+                        )
+                        print(message)
+                        self._emit_event("warning", message)
+                        self._lateral_limit_warned = True
+                    continue
+                corr_tool[axis] = step
+            self.chisel_lateral_active = lateral_active
+            if lateral_active:
+                pass  # X 恒力冻结：保持当前 OV_PRO 不动，避免与横向调节互相拉扯
+            else:
+                self._slew_ov(self._desired_ov_pro(press_raw, press_slow, target_force_n))
+            return self._apply_correction(corr_tool, tcp_angles_deg)
         self.ov_pro_pct = cfg.default_ov_pro
+        self.chisel_lateral_active = False
 
         if self.tripped:
             self.integral_n_s = 0.0
@@ -412,8 +524,9 @@ class ForceController:
 
     @property
     def status_line(self) -> str:
+        lateral = " 横向让位中" if self.chisel_lateral_active else ""
         return (
-            f"接触={'是' if self.in_contact else '否'} "
+            f"接触={'是' if self.in_contact else '否'}{lateral} "
             f"累积修正=({self.corr_cumulative_mm[0]:.2f},"
             f"{self.corr_cumulative_mm[1]:.2f},"
             f"{self.corr_cumulative_mm[2]:.2f}) mm "

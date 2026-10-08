@@ -26,7 +26,7 @@ python3 udp_server.py --calibrate
 python3 udp_server.py --run
 
 # 力控模式（恒力钻孔）：补偿 + 恒力控制
-# RobotStatus=FALSE 钻孔：回发 OV_PRO 改 $OV_PRO；TRUE 凿击位移后续再做。
+# RobotStatus=FALSE 钻孔：回发 OV_PRO 改 $OV_PRO；TRUE 凿击：X 恒力 + Y/Z 横向让位。
 # 机器人侧运行 FT_Drilling.src；RobotStatus 由全局变量下发
 # 无 ft_calibration.json 时不再退出：力控挂起待激活，标定完成后自动恢复
 python3 udp_server.py --force
@@ -54,6 +54,7 @@ python3 udp_server.py --data-dir data --data-cap-mb 2048   # 数据目录与容�
 - **告警**：断线、超力保护触发等在页面顶部横幅提示，事件流记录全部事件
 - **历史回放**：任选 CSV 查看曲线，支持时间段缩放查询
 - **数据管理**：CSV 下载/删除/锁定；超出 `--data-cap-mb` 自动删除最旧的未锁定文件，锁定文件永不自动清理
+- **力控参数设定**：在线改凿击横向让位阈值/行程上限/卡滞阈值/方向符号与默认目标力（白名单校验，实时生效并写回 `ft_calibration_config.json`）
 
 ## Ubuntu 生产部署
 
@@ -79,13 +80,13 @@ journalctl -u kuka-rsi -f        # 日志
 | `udp_server.py` | UDP 主程序：接收、解析、CSV、模式入口 |
 | `calibration_runner.py` | 采样触发、均值样本、求解、运行时补偿 |
 | `calibration_math.py` | 旋转/变换、重力模型拟合、补偿计算 |
-| `force_controller.py` | 恒力控制：钻孔用 `$OV_PRO` 控进给；凿击位移尚未启用 |
+| `force_controller.py` | 恒力控制：钻孔用 `$OV_PRO` 控进给；凿击 X 恒力 + Y/Z 横向零力让位（滑坑/卡滞卸载） |
 | `FT_Drilling.src/.dat` | 恒力钻孔程序（`RobotStatus`、`target_force` 全局变量） |
 | `RSIEthernet.snippet.xml` | 与现场一致的 SEND `RobotStatus` / RECEIVE `OV_PRO` 片段 |
 | `calibration_models.py` | 配置与数据结构 |
 | `calibration_io.py` | 配置/结果/样本读写 |
 | `data_manager.py` | CSV 数据管理：锁定、删除、容量滚动清理、历史回放抽稀 |
-| `web_monitor.py` | Web 监控服务（纯标准库 HTTP + SSE），只读不参与控制 |
+| `web_monitor.py` | Web 监控服务（纯标准库 HTTP + SSE），只读监控 + 力控参数在线设定 |
 | `web_static/` | 监控单页前端（Chart.js 已本地化，离线可用） |
 | `deploy/` | Ubuntu systemd 部署（`kuka-rsi.service`、`install.sh`） |
 | `ft_calibration_config.json` | 标定与外参配置 |
@@ -144,7 +145,7 @@ journalctl -u kuka-rsi -f        # 日志
 | 7–9 | Act_X ~ Act_Z | DOUBLE | TCP 位置 (mm) |
 | 10–12 | Act_A ~ Act_C | DOUBLE | TCP 姿态 (deg) |
 | 13 | data_collection | BOOL | 标定采样触发 |
-| 14 | RobotStatus | BOOL | FALSE=钻孔（控倍率）；TRUE=凿击（位移后续） |
+| 14 | RobotStatus | BOOL | FALSE=钻孔（控倍率）；TRUE=凿击（X 恒力 + Y/Z 横向让位） |
 
 RECEIVE（上位机 → 机器人）：
 
@@ -173,7 +174,7 @@ RECEIVE（上位机 → 机器人）：
 `Map2OV_PRO` 改的是程序倍率（0–100%），不是 mm/s。实际路径速度 = `$VEL.CP × OV_PRO/100`。
 
 - `RobotStatus = FALSE`（钻孔）：按接触力映射倍率（空载接近 100%；到目标力或超力发 0，LIN 真正停住）。RKorr 为 0。
-- `RobotStatus = TRUE`（凿击）：位移控制尚未启用；当前回发默认倍率、RKorr=0。
+- `RobotStatus = TRUE`（凿击）：X 仍按 OV_PRO 恒力压紧；Y/Z 横向力超过阈值（默认 15N）时零力让位卸载（滑坑/卡滞防护，最多让位 20mm，横向卡滞 >100N 沿 -X 全速退刀）。横向让位期间 X 恒力冻结，横向撤销后恢复；切回钻孔时横向叠加自动缓撤到 0。参数可在 Web 监控台在线设定。
 - RSIVisual：Ethernet **Out7** → Map2OV_PRO，输入量程必须是 **0～100**。
 - 关 RSI 前先退刀让接触力下降，倍率回到 100%，避免 `$OV_PRO` 停在 0。不要用 TRUE 当作“结束钻孔”（TRUE 表示凿击）。
 - 现场 XML 片段见 `RSIEthernet.snippet.xml`。

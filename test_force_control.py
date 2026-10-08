@@ -243,16 +243,134 @@ assert ctrl.ov_pro_pct <= 1e-6
 assert all(abs(c) < 1e-9 for c in ctrl.corr_cumulative_mm), "钻孔超力应停进给，不得抽刀叠加"
 print("19. 钻孔超力：OV=0、不叠位移，OK")
 
+# 凿击（RobotStatus=TRUE）：X 仍按 OV_PRO 恒力压紧；无横向力时 RKorr=0
 ctrl.reset()
-rk = ctrl.update([-80.0, 0.0, 0.0], ANGLES, target, mode="chisel")
-assert abs(ctrl.ov_pro_pct - fc.default_ov_pro) < 1e-6
-assert all(abs(v) < 1e-9 for v in rk.values())
-print("20. 凿击占位：默认倍率、RKorr=0（位移后续），OK")
+for _ in range(int(0.3 / fc.cycle_s)):
+    rk = ctrl.update([-50.0, 0.0, 0.0], ANGLES, target, mode="chisel")
+assert all(abs(v) < 1e-9 for v in rk.values()), f"凿击无横向力不应叠 RKorr: {rk}"
+assert ctrl.ov_pro_pct <= 1e-6, f"凿击 X 恒力到位应停进给: {ctrl.ov_pro_pct}"
+print("20. 凿击无横向力：X 仍 OV_PRO 恒力（到位 OV→0）、RKorr=0，OK")
 
 ctrl.reset()
 rk = ctrl.update([-200.0, 0.0, 0.0], ANGLES, target, mode="overlay")
 assert rk["RKorr.X"] < -0.5 * fc.per_cycle_max_mm
 assert abs(ctrl.ov_pro_pct - fc.default_ov_pro) < 1e-6
 print("21. overlay 测试路径超力仍走 RKorr 退刀，OK")
+
+# ---- 凿击横向让位：Y/Z 零力让位（滑坑/卡滞卸载），方向 = 符号位 * 读数方向 ----
+# 读数约定：读数 = 工件对工具作用力（压紧时 X 读负）。批头被 +Y 侧坑壁顶 -> 读数 +Y
+# -> 让位 +Y（背离障碍物）。口述"批头+Y受力"指工具对外施力方向，与此是同一动作。
+
+# 22. 让位方向与读数同号；横向调节期间 X 恒力冻结，撤力后恢复
+ctrl.reset()
+for _ in range(int(0.1 / fc.cycle_s)):
+    ctrl.update([-30.0, 0.0, 0.0], ANGLES, target, mode="chisel")
+ov_settled = ctrl.ov_pro_pct   # press=30N -> OV 稳在 ~66.7%
+assert 0.0 < ov_settled < fc.default_ov_pro, f"预置 OV 应处于中途: {ov_settled}"
+steps_y = []
+ov_at_activate = None
+for _ in range(int(0.5 / fc.cycle_s)):
+    # X 同时升到 40N（目标 OV ~33%）：若不冻结，OV 会一路降下去
+    rk = ctrl.update([-40.0, 40.0, 0.0], ANGLES, target, mode="chisel")
+    steps_y.append(rk["RKorr.Y"])
+    assert abs(rk["RKorr.X"]) < 1e-9, f"凿击 X 不用 RKorr: {rk}"
+    if ctrl.chisel_lateral_active and ov_at_activate is None:
+        ov_at_activate = ctrl.ov_pro_pct
+assert ov_at_activate is not None and ov_at_activate > 35.0, \
+    f"横向激活时 OV 应尚未降到新目标 ~33%: {ov_at_activate}"
+active_steps = [s for s in steps_y if s != 0.0]
+assert active_steps, "横向力 40N 超死区后应产生让位增量"
+assert all(s > 0.0 for s in active_steps), f"让位方向应与 +Y 读数同号: {active_steps[:5]}"
+assert max(abs(s) for s in active_steps) <= fc.per_cycle_max_mm + 1e-9
+assert ctrl.corr_cumulative_mm[1] > 1e-9
+assert ctrl.ov_pro_pct == ov_at_activate, \
+    f"横向调节期间 X 恒力应冻结: {ov_at_activate} -> {ctrl.ov_pro_pct}"
+for _ in range(50):
+    ctrl.update([-40.0, 0.0, 0.0], ANGLES, target, mode="chisel")
+assert not ctrl.chisel_lateral_active, "横向力撤销后应退出让位"
+assert ctrl.ov_pro_pct < ov_at_activate, "横向撤销后 X 恒力应恢复调节"
+print("22. 横向让位：方向与读数同号、X 恒力冻结/恢复，OK")
+
+# 23. 横向力低于死区不让位（空载残差 5~12N 不得漂移）
+ctrl.reset()
+for _ in range(int(1.0 / fc.cycle_s)):
+    rk = ctrl.update([-30.0, 10.0, 10.0], ANGLES, target, mode="chisel")
+assert abs(rk["RKorr.Y"]) < 1e-9 and abs(rk["RKorr.Z"]) < 1e-9, f"低于死区不应让位: {rk}"
+assert not ctrl.chisel_lateral_active
+assert abs(ctrl.corr_cumulative_mm[1]) < 1e-9 and abs(ctrl.corr_cumulative_mm[2]) < 1e-9
+print("23. 横向力 10N < 死区 15N：不让位（空载残差不漂移），OK")
+
+# 24. 方向符号位反号生效（实机手推标定后可改）
+ctrl.reset()
+fc.chisel_lateral_sign = -1
+try:
+    steps = []
+    for _ in range(int(0.3 / fc.cycle_s)):
+        rk = ctrl.update([-30.0, 40.0, 0.0], ANGLES, target, mode="chisel")
+        steps.append(rk["RKorr.Y"])
+    active = [s for s in steps if s != 0.0]
+    assert active and all(s < 0.0 for s in active), f"反号后让位应沿 -Y: {active[:5]}"
+finally:
+    fc.chisel_lateral_sign = 1
+print("24. 让位方向符号位 -1 生效，OK")
+
+# 25. Z 轴同样让位（负读数 -> 负方向）
+ctrl.reset()
+steps_z = []
+for _ in range(int(0.3 / fc.cycle_s)):
+    rk = ctrl.update([-30.0, 0.0, -40.0], ANGLES, target, mode="chisel")
+    steps_z.append(rk["RKorr.Z"])
+active = [s for s in steps_z if s != 0.0]
+assert active and all(s < 0.0 for s in active), f"Z 轴让位方向应与读数同号(负): {active[:5]}"
+assert ctrl.corr_cumulative_mm[2] < -1e-9
+print("25. Z 轴横向让位同号生效，OK")
+
+# 26. 让位行程上限 ±20mm：到限后该轴停止让位
+ctrl.reset()
+old_gain = fc.chisel_lateral_gain_mm_per_s_per_n
+fc.chisel_lateral_gain_mm_per_s_per_n = 5.0  # 40-15=25N 超出 -> 饱和到每拍上限
+try:
+    for _ in range(int(2.0 / fc.cycle_s)):   # 0.08mm/拍，~250 拍到 20mm
+        ctrl.update([-30.0, 40.0, 0.0], ANGLES, target, mode="chisel")
+    assert ctrl.corr_cumulative_mm[1] <= fc.chisel_lateral_max_mm + 1e-9, \
+        f"横向累计超上限: {ctrl.corr_cumulative_mm[1]}"
+    assert abs(ctrl.corr_cumulative_mm[1] - fc.chisel_lateral_max_mm) < 0.5 * fc.per_cycle_max_mm
+    rk = ctrl.update([-30.0, 40.0, 0.0], ANGLES, target, mode="chisel")
+    assert abs(rk["RKorr.Y"]) < 1e-9, f"到 20mm 上限后应停止让位: {rk}"
+finally:
+    fc.chisel_lateral_gain_mm_per_s_per_n = old_gain
+print(f"26. 让位行程上限 {fc.chisel_lateral_max_mm} mm 到限停止，OK")
+
+# 27. 横向卡滞硬阈值：原始力超限立即 -X 全速退刀，过零不立即解锁
+ctrl.reset()
+rk = ctrl.update([-30.0, 150.0, 0.0], ANGLES, target, mode="chisel")
+assert ctrl.tripped, "横向 150N 应触发卡滞保护"
+assert rk["RKorr.X"] < -0.5 * fc.per_cycle_max_mm, f"卡滞保护应沿 -X 全速退刀: {rk}"
+assert abs(rk["RKorr.Y"]) < 1e-9, "保护期间不再让位"
+for _ in range(10):
+    ctrl.update([-1.0, 1.0, 0.0], ANGLES, target, mode="chisel")
+    assert ctrl.tripped, "卡滞保护过零 40ms 内不得解除"
+for _ in range(int(0.5 / fc.cycle_s)):
+    ctrl.update([-1.0, 1.0, 0.0], ANGLES, target, mode="chisel")
+assert not ctrl.tripped, "持续卸荷 0.2s 后应解除保护"
+print("27. 横向卡滞保护：立即退刀、闩锁、卸荷解除，OK")
+
+# 28. 退出凿击回钻孔：横向叠加按每拍限幅缓撤到 0，X 始终 0
+ctrl.reset()
+old_gain = fc.chisel_lateral_gain_mm_per_s_per_n
+fc.chisel_lateral_gain_mm_per_s_per_n = 5.0
+try:
+    for _ in range(int(0.6 / fc.cycle_s)):
+        ctrl.update([-30.0, 40.0, 0.0], ANGLES, target, mode="chisel")
+    assert ctrl.corr_cumulative_mm[1] > 1.0, "应已积累明显横向让位"
+finally:
+    fc.chisel_lateral_gain_mm_per_s_per_n = old_gain
+for _ in range(int(2.0 / fc.cycle_s)):
+    rk = ctrl.update([-30.0, 0.0, 0.0], ANGLES, target, mode="drill")
+    assert abs(rk["RKorr.X"]) < 1e-9, f"钻孔 X 不用 RKorr: {rk}"
+    assert abs(rk["RKorr.Y"]) <= fc.per_cycle_max_mm + 1e-9
+assert abs(ctrl.corr_cumulative_mm[1]) < 1e-9, f"钻孔下横向叠加应撤到 0: {ctrl.corr_cumulative_mm}"
+assert abs(rk["RKorr.Y"]) < 1e-9
+print("28. 凿击->钻孔切换：横向叠加按限幅缓撤到 0，OK")
 
 print("\n全部自检通过")
