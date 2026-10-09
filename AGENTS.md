@@ -24,7 +24,7 @@
 | `rerun_calibration.py` | 用现有样本离线重跑标定求解，与旧结果对比 |
 | `data_manager.py` | CSV 数据文件管理：白名单校验、列举、锁定/解锁、删除、容量控制 `enforce_capacity`、历史回放 `read_series`（供 Web 层调用） |
 | `web_monitor.py` | Web 监控层（纯标准库 `http.server`）：`start_web_server(server, data_dir, data_cap_mb, port, force_config_path)` 启动 HTTP + SSE 推送，只读监控与文件管理 + `/api/force_config` 力控参数在线设定（白名单+范围校验、实时生效并写回 `ft_calibration_config.json`）+ `/api/debug_override` 调试固定输出设定 + `/api/server_mode` 服务模式在线切换，**不直接参与控制环** |
-| `web_static/` | 无构建单页监控台（`index.html`/`app.js`/`style.css` + 调试台 `debug.html`/`debug.js`），图表用本地化 `vendor/chart.umd.min.js`（Chart.js 4.4.1，现场无外网，勿删） |
+| `web_static/` | 无构建单页监控台（`index.html`/`app.js`/`style.css` + 调试台 `debug.html`/`debug.js`），图表用本地化 `vendor/uplot.iife.min.js` + `uplot.min.css`（uPlot 1.6.31，现场无外网，勿删；共用封装 `uplot_charts.js`） |
 | `test_web_monitor.py` | Web 层测试：data_manager 单测 + Web API 集成（dummy server + http.client） |
 | `deploy/` | Ubuntu 生产部署：`kuka-rsi.service`（systemd，开机自启 + `Restart=always`）、`install.sh`（装到 `/opt/kuka-rsi`） |
 | `analysis_check.py` / `analysis_check2.py` | 一次性离线诊断脚本（需 numpy），用于历史 bug 排查，非正式测试 |
@@ -47,7 +47,7 @@ python udp_server.py --ip 192.168.2.10 --host-ip 192.168.2.250 --port 59152
 
 命令行参数只决定**启动默认**；监控/力控可在 Web 页面顶栏的"监控/力控"分段开关**运行时切换**（`POST /api/server_mode`），无需重启服务。切换时会停用调试固定输出、复位力控器、RKorr 清零、OV_PRO 回 100%。
 
-Web 监控默认随主程序启动（`web_monitor.py`，端口 `--web-port 8080`，`--no-web` 关闭，`--data-dir`/`--data-cap-mb` 控制数据目录与容量上限）。`web_static/vendor/chart.umd.min.js` 是本地化的 Chart.js，属源码需提交。监控台"力控参数设定"卡片（`GET/POST /api/force_config`）可在线改凿击横向让位阈值/行程上限/卡滞阈值/方向符号、轴线对中开关与参数、默认目标力，实时生效并持久化。`/debug.html` 调试台（`GET/POST /api/debug_override`）可固定下发 RKorr 每拍增量 + OV_PRO 并监控 Act 位姿，用于实机验证方向约定（如 `chisel_lateral_sign`/`align_sign` 手推标定前的方向确认）。
+Web 监控默认随主程序启动（`web_monitor.py`，端口 `--web-port 8080`，`--no-web` 关闭，`--data-dir`/`--data-cap-mb` 控制数据目录与容量上限）。`web_static/vendor/uplot.*` 是本地化的 uPlot（50KB，比 Chart.js 小 4 倍），属源码需提交。监控台"力控参数设定"卡片（`GET/POST /api/force_config`）**全部 44 个力控参数可在线修改**（6 分组折叠、悬停显示参数意义与安全范围），实时生效并持久化。`/debug.html` 调试台（`GET/POST /api/debug_override`）可固定下发 RKorr 每拍增量 + OV_PRO 并监控 Act 位姿，用于实机验证方向约定（如 `chisel_lateral_sign`/`align_sign` 手推标定前的方向确认）。
 
 测试（**改动 `force_controller.py`、`udp_server.py` 或 Web 层后四个都必须通过**）：
 

@@ -202,103 +202,13 @@ async function pollStatus() {
   }
 }
 
-/* ---------------- 实时曲线（Chart.js，示波器配色） ---------------- */
-
-const CHART_GRID = "rgba(148, 163, 178, 0.10)";
-const CHART_TICK = "#7E8C9A";
-
-/* 空态提示：无数据点时在图心画一行说明（无机器人/未连接时的引导） */
-const emptyStatePlugin = {
-  id: "emptyState",
-  afterDraw(chart) {
-    const hasData = (chart.data.datasets || []).some(ds => ds.data && ds.data.length > 0);
-    if (hasData) return;
-    const { ctx, chartArea } = chart;
-    if (!chartArea) return;
-    ctx.save();
-    ctx.fillStyle = CHART_TICK;
-    ctx.font = "13px 'Segoe UI', 'Microsoft YaHei', sans-serif";
-    ctx.textAlign = "center";
-    ctx.textBaseline = "middle";
-    ctx.fillText("等待 RSI 数据…", (chartArea.left + chartArea.right) / 2,
-      (chartArea.top + chartArea.bottom) / 2);
-    ctx.restore();
-  },
-};
-Chart.register(emptyStatePlugin);
-
-function themedChartOptions(extra = {}) {
-  return {
-    animation: false,
-    responsive: true,
-    maintainAspectRatio: false,
-    interaction: { intersect: false },
-    plugins: {
-      legend: {
-        labels: {
-          color: CHART_TICK,
-          boxWidth: 8,
-          boxHeight: 8,
-          usePointStyle: false,
-          font: { size: 11 },
-        },
-      },
-    },
-    scales: {
-      x: { ticks: { color: CHART_TICK, maxTicksLimit: 8, font: { size: 10 } }, grid: { color: CHART_GRID } },
-      y: { ticks: { color: CHART_TICK, font: { size: 10 } }, grid: { color: CHART_GRID } },
-    },
-    ...extra,
-  };
-}
-
-function makeLiveChart(canvasId, labels, colors) {
-  return new Chart(document.getElementById(canvasId), {
-    type: "line",
-    data: {
-      labels: [],
-      datasets: labels.map((label, i) => ({
-        label,
-        data: [],
-        borderColor: colors[i % colors.length],
-        backgroundColor: colors[i % colors.length],
-        borderWidth: 1.5,
-        pointRadius: 0,
-        tension: 0.15,
-      })),
-    },
-    options: themedChartOptions(),
-  });
-}
+/* ---------------- 实时曲线（uPlot，示波器配色） ---------------- */
 
 const chartForce = makeLiveChart("chart-force", ["Fx", "Fy", "Fz"],
   ["Fx", "Fy", "Fz"].map(k => CHANNELS[k]));
 const chartTorque = makeLiveChart("chart-torque", ["Mx", "My", "Mz"],
   ["Mx", "My", "Mz"].map(k => CHANNELS[k]));
 const chartOvpro = makeLiveChart("chart-ovpro", ["OV_PRO"], ["#E9EEF3"]);
-
-function pushLivePoint(chart, timeLabel, values) {
-  chart.data.labels.push(timeLabel);
-  chart.data.datasets.forEach((ds, i) => ds.data.push(values[i]));
-}
-
-function trimLiveChart(chart) {
-  const cutoff = Date.now() - LIVE_WINDOW_MS;
-  const labels = chart.data.labels;
-  let drop = 0;
-  // labels 是 "HH:MM:SS" 字符串；用点数粗裁 + 当日时间比较
-  while (drop < labels.length) {
-    const parts = labels[drop].split(":");
-    if (parts.length < 3) { drop++; continue; }
-    const t = new Date();
-    t.setHours(+parts[0], +parts[1], +parts[2].split(".")[0], 0);
-    if (t.getTime() < cutoff) drop++; else break;
-  }
-  if (drop > 0) {
-    chart.data.labels.splice(0, drop);
-    chart.data.datasets.forEach(ds => ds.data.splice(0, drop));
-  }
-}
 
 /* ---------------- SSE 实时帧 ---------------- */
 
@@ -316,16 +226,10 @@ function startStream() {
       setLamp("lamp-chisel", frame.robot_status ? "kuka" : null,
         frame.robot_status ? "凿击" : "钻孔");
     }
-    const label = (frame.timestamp || "").split(" ")[1] || "";
-    pushLivePoint(chartForce, label, frame.tcp.slice(0, 3));
-    pushLivePoint(chartTorque, label, frame.tcp.slice(3, 6));
-    pushLivePoint(chartOvpro, label, [frame.ov_pro]);
-    trimLiveChart(chartForce);
-    trimLiveChart(chartTorque);
-    trimLiveChart(chartOvpro);
-    chartForce.update("none");
-    chartTorque.update("none");
-    chartOvpro.update("none");
+    const tSec = frameTimeSec(frame.timestamp);
+    chartForce.push(tSec, frame.tcp.slice(0, 3));
+    chartTorque.push(tSec, frame.tcp.slice(3, 6));
+    chartOvpro.push(tSec, [frame.ov_pro]);
   };
   es.onerror = () => {
     // EventSource 自动重连；断线由 /api/status 轮询的链路灯提示
@@ -379,28 +283,18 @@ async function loadHistory() {
       ["tcp_Fx_N", "Fx (N)"], ["tcp_Fy_N", "Fy (N)"], ["tcp_Fz_N", "Fz (N)"],
       ["tcp_Mx_Nm", "Mx (N·m)"], ["tcp_My_Nm", "My (N·m)"], ["tcp_Mz_Nm", "Mz (N·m)"],
     ];
-    const datasets = [];
+    const labels = [];
+    const colors = [];
+    const arrays = [];
     for (const [col, label] of defs) {
       if (!Array.isArray(series[col])) continue;
-      const key = label.slice(0, 2);
-      datasets.push({
-        label,
-        data: series[col],
-        borderColor: CHANNELS[key],
-        backgroundColor: CHANNELS[key],
-        borderWidth: 1.5,
-        pointRadius: 0,
-        tension: 0.15,
-      });
+      labels.push(label);
+      colors.push(CHANNELS[label.slice(0, 2)]);
+      arrays.push(series[col]);
     }
-    const labels = data.timestamps.map(t => (t.split(" ")[1] || t));
-    if (chartHistory) chartHistory.destroy();
-    chartHistory = new Chart(document.getElementById("chart-history"), {
-      type: "line",
-      data: { labels, datasets },
-      options: themedChartOptions({ scales: { x: { ticks: { color: CHART_TICK, maxTicksLimit: 12 }, grid: { color: CHART_GRID } }, y: { ticks: { color: CHART_TICK }, grid: { color: CHART_GRID } } } }),
-    });
-    info.textContent = `已加载 ${labels.length} 点`;
+    const times = data.timestamps.map(ts => frameTimeSec(ts));
+    chartHistory = renderHistoryChart("chart-history", labels, colors, times, arrays);
+    info.textContent = `已加载 ${times.length} 点`;
   } catch (err) {
     info.textContent = "加载失败：" + err.message;
   }

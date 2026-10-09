@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>调试台 · KUKA RSI 力控监控</title>
   <link rel="stylesheet" href="/static/style.css">
+  <link rel="stylesheet" href="/static/vendor/uplot.min.css">
 </head>
 <body>
 
@@ -116,16 +117,17 @@
 
     <section class="panel">
       <h2>机械臂位置 Act_X / Y / Z <small>mm</small></h2>
-      <div class="chart-box tall"><canvas id="chart-pos"></canvas></div>
+      <div class="chart-box tall"><div id="chart-pos" class="uplot-fill"></div></div>
     </section>
     <section class="panel">
       <h2>姿态 Act_A / B / C <small>°</small></h2>
-      <div class="chart-box mid"><canvas id="chart-att"></canvas></div>
+      <div class="chart-box mid"><div id="chart-att" class="uplot-fill"></div></div>
     </section>
 
   </main>
 
-  <script src="/static/vendor/chart.umd.min.js"></script>
+  <script src="/static/vendor/uplot.iife.min.js"></script>
+  <script src="/static/uplot_charts.js"></script>
   <script src="/static/debug.js"></script>
   <script src="/static/mode_switch.js"></script>
 </body>

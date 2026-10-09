@@ -57,89 +57,10 @@ function pulseCycle() {
   cycleTimer = setTimeout(() => cycleDot.classList.remove("lit"), 120);
 }
 
-/* ---------------- 图表（与主监控台同款主题） ---------------- */
-
-const CHART_GRID = "rgba(148, 163, 178, 0.10)";
-const CHART_TICK = "#7E8C9A";
-
-const emptyStatePlugin = {
-  id: "emptyState",
-  afterDraw(chart) {
-    const hasData = (chart.data.datasets || []).some(ds => ds.data && ds.data.length > 0);
-    if (hasData) return;
-    const { ctx, chartArea } = chart;
-    if (!chartArea) return;
-    ctx.save();
-    ctx.fillStyle = CHART_TICK;
-    ctx.font = "13px 'Segoe UI', 'Microsoft YaHei', sans-serif";
-    ctx.textAlign = "center";
-    ctx.textBaseline = "middle";
-    ctx.fillText("等待 RSI 数据…", (chartArea.left + chartArea.right) / 2,
-      (chartArea.top + chartArea.bottom) / 2);
-    ctx.restore();
-  },
-};
-Chart.register(emptyStatePlugin);
-
-function themedChartOptions() {
-  return {
-    animation: false,
-    responsive: true,
-    maintainAspectRatio: false,
-    interaction: { intersect: false },
-    plugins: {
-      legend: { labels: { color: CHART_TICK, boxWidth: 8, font: { size: 11 } } },
-    },
-    scales: {
-      x: { ticks: { color: CHART_TICK, maxTicksLimit: 8, font: { size: 10 } }, grid: { color: CHART_GRID } },
-      y: { ticks: { color: CHART_TICK, font: { size: 10 } }, grid: { color: CHART_GRID } },
-    },
-  };
-}
-
-function makeLiveChart(canvasId, labels, colors) {
-  return new Chart(document.getElementById(canvasId), {
-    type: "line",
-    data: {
-      labels: [],
-      datasets: labels.map((label, i) => ({
-        label,
-        data: [],
-        borderColor: colors[i % colors.length],
-        backgroundColor: colors[i % colors.length],
-        borderWidth: 1.5,
-        pointRadius: 0,
-        tension: 0.15,
-      })),
-    },
-    options: themedChartOptions(),
-  });
-}
+/* ---------------- 图表（uPlot，与主监控台同款主题） ---------------- */
 
 const chartPos = makeLiveChart("chart-pos", ["Act_X", "Act_Y", "Act_Z"], CHANNELS_POS);
 const chartAtt = makeLiveChart("chart-att", ["Act_A", "Act_B", "Act_C"], CHANNELS_ATT);
-
-function pushLivePoint(chart, timeLabel, values) {
-  chart.data.labels.push(timeLabel);
-  chart.data.datasets.forEach((ds, i) => ds.data.push(values[i]));
-}
-
-function trimLiveChart(chart) {
-  const cutoff = Date.now() - LIVE_WINDOW_MS;
-  const labels = chart.data.labels;
-  let drop = 0;
-  while (drop < labels.length) {
-    const parts = labels[drop].split(":");
-    if (parts.length < 3) { drop++; continue; }
-    const t = new Date();
-    t.setHours(+parts[0], +parts[1], +parts[2].split(".")[0], 0);
-    if (t.getTime() < cutoff) drop++; else break;
-  }
-  if (drop > 0) {
-    chart.data.labels.splice(0, drop);
-    chart.data.datasets.forEach(ds => ds.data.splice(0, drop));
-  }
-}
 
 /* ---------------- SSE：位姿回读 ---------------- */
 
@@ -158,13 +79,9 @@ function startStream() {
         document.getElementById("delta-" + key).textContent = fmtSigned(act[i] - refAct[i], i < 3 ? 2 : 3);
       }
     }
-    const label = (frame.timestamp || "").split(" ")[1] || "";
-    pushLivePoint(chartPos, label, act.slice(0, 3));
-    pushLivePoint(chartAtt, label, act.slice(3, 6));
-    trimLiveChart(chartPos);
-    trimLiveChart(chartAtt);
-    chartPos.update("none");
-    chartAtt.update("none");
+    const tSec = frameTimeSec(frame.timestamp);
+    chartPos.push(tSec, act.slice(0, 3));
+    chartAtt.push(tSec, act.slice(3, 6));
   };
   es.onerror = () => { /* 自动重连；断线由链路灯提示 */ };
 }
