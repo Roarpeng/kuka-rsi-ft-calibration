@@ -17,6 +17,8 @@ fc.align_chisel_enable = False
 fc.align_drill_enable = False
 fc.align_deadband_nm = 0.5
 fc.align_trip_nm = 8.0
+fc.align_per_cycle_max_deg = 0.02
+fc.align_max_deg = 3.0
 fc.axis = "X"  # 本仿真按钻轴=X 的典范帧跑（现场 TCP 重标定后 axis=Z，通道自动推导）
 print("配置：轴 TOOL", fc.axis, "目标力", fc.default_target_force_n,
       "N  Kp", fc.kp_mm_per_s_per_n, " Ki", fc.ki_mm_per_s2_per_n,
