@@ -21,7 +21,8 @@
     <ELEMENT TAG="Act_B"  TYPE="DOUBLE" INDX="11" />
     <ELEMENT TAG="Act_C"  TYPE="DOUBLE" INDX="12" />
     <ELEMENT TAG="data_collection" TYPE="BOOL" INDX="13" />
-    <ELEMENT TAG="RobotStatus" TYPE="BOOL" INDX="14" />
+    <ELEMENT TAG="RobotStatus" TYPE="BOOL" INDX="14"
+INDX="15" />
   </ELEMENTS>
 </SEND>
 <RECEIVE>

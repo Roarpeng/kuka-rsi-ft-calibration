@@ -70,6 +70,7 @@ class RSIData:
     ipoc_text: str = "0"
     data_collection: bool = False  # 标定采样触发：true 采集，false 不采集
     RobotStatus: int = 2           # INT：1=标定 2=钻孔（OV_PRO 力-速度）3=凿击（恒力+横向让位+对中）
+    FORCEDATA: int = 0              # 机器人下发的恒力目标值 (N)（SEND IND 15；0=未下发用默认）
     target_force: float = 0.0      # 力控目标力（可选 XML；未带则用配置默认值）
     target_force_present: bool = False  # RSI XML 是否带了 <target_force>；未带则用配置默认值
     sensor_fx: float = 0.0
@@ -119,6 +120,7 @@ SAMPLE_ROB_XML = (
     "<Act_A>-83.7</Act_A><Act_B>0.8</Act_B><Act_C>179.8</Act_C>"
     "<data_collection>FALSE</data_collection>"
     "<RobotStatus>2</RobotStatus>"
+    "<FORCEDATA>50</FORCEDATA>"
     "<IPOC>123645634563</IPOC>"
     "</Rob>"
 )
@@ -169,6 +171,7 @@ class RSIServer:
         ("Act_C", "DOUBLE", 12),
         ("data_collection", "BOOL", 13),
         ("RobotStatus", "INT", 14),   # 1=标定；2=钻孔（OV_PRO 力-速度）；3=凿击（恒力+横向让位+对中）
+        ("FORCEDATA", "INT", 15),      # 恒力目标值 (N)：KRL 程序决定用多大的力钻孔/凿击；0=未下发
     ]
 
     # 对应机器人 RSI XML 的 RECEIVE/ELEMENTS（上位机 -> 机器人）
@@ -189,7 +192,7 @@ class RSIServer:
         "sensor_Fx_N", "sensor_Fy_N", "sensor_Fz_N", "sensor_Mx_Nm", "sensor_My_Nm", "sensor_Mz_Nm",
         "tcp_Fx_N", "tcp_Fy_N", "tcp_Fz_N", "tcp_Mx_Nm", "tcp_My_Nm", "tcp_Mz_Nm",
         "sample_status",
-        "target_force_N", "rkorr_x_mm", "rkorr_y_mm", "rkorr_z_mm",
+        "target_force_N", "FORCEDATA_N", "rkorr_x_mm", "rkorr_y_mm", "rkorr_z_mm",
         "rkorr_a_deg", "rkorr_b_deg", "rkorr_c_deg",
         "corr_cum_x_mm", "corr_cum_y_mm", "corr_cum_z_mm",
         "corr_cum_a_deg", "corr_cum_b_deg", "corr_cum_c_deg",
@@ -227,7 +230,6 @@ class RSIServer:
         self.parse_ok_count = 0
         self.packet_count = 0  # run() 主循环累计成功解析包数（Web 监控可读）
         self.last_rx_monotonic: Optional[float] = None  # 最近收包时刻（供 Web 监控判断链路活性）
-        self._warned_missing_target = False
 
         # Web 监控层可选回调：均为 best-effort，异常不拖垮控制环
         self.on_frame: Optional[Callable[[RSIData], None]] = None
@@ -539,6 +541,7 @@ class RSIServer:
                 rsi_data.tcp_mx, rsi_data.tcp_my, rsi_data.tcp_mz,
                 rsi_data.sample_status,
                 rsi_data.target_force,
+                rsi_data.FORCEDATA,
                 self.config.rkorr["RKorr.X"], self.config.rkorr["RKorr.Y"], self.config.rkorr["RKorr.Z"],
                 self.config.rkorr["RKorr.A"], self.config.rkorr["RKorr.B"], self.config.rkorr["RKorr.C"],
                 *(
@@ -652,17 +655,13 @@ class RSIServer:
         assert self.force_controller is not None
         assert self.calibration_config is not None
         fc_cfg = self.calibration_config.force_control
-        if rsi_data.target_force_present:
-            # 机器人显式下发（含 0）：0 = 关 RSI 前撤除修正；未下发则用默认 50N
+        if rsi_data.FORCEDATA > 0:
+            # FORCEDATA（SEND IND 15）：KRL 程序下发的恒力目标值，优先级最高
+            target = float(rsi_data.FORCEDATA)
+        elif rsi_data.target_force_present:
             target = rsi_data.target_force
         else:
             target = fc_cfg.default_target_force_n
-            if not self._warned_missing_target:
-                print(
-                    f"[力控] RSI 包未含 target_force，使用默认 {target:.1f} N。"
-                    "若要在示教器在线改目标力，请在 RSI XML SEND 加入同名元素。"
-                )
-                self._warned_missing_target = True
         rkorr = self.force_controller.update(
             force_tcp=[rsi_data.tcp_fx, rsi_data.tcp_fy, rsi_data.tcp_fz],
             tcp_angles_deg=[rsi_data.Act_A, rsi_data.Act_B, rsi_data.Act_C],
