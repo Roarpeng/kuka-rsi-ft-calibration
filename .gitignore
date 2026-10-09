@@ -27,3 +27,4 @@ Cursor/
 .vscode/
 *.swp
 .DS_Store
+_patch_*.py
