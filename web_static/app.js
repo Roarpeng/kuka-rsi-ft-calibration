@@ -515,35 +515,122 @@ function renderFileSelect(files) {
 
 /* ---------------- 凿击让位参数设定 ---------------- */
 
-const FORCE_CONFIG_KEYS = [
-  "default_target_force_n",
-  "chisel_lateral_deadband_n",
-  "chisel_lateral_max_mm",
-  "chisel_lateral_trip_n",
-  "chisel_lateral_gain_mm_per_s_per_n",
-  "chisel_lateral_sign",
-  "align_chisel_enable",
-  "align_drill_enable",
-  "align_deadband_nm",
-  "align_gain_deg_per_s_per_nm",
-  "align_max_deg",
-  "align_trip_nm",
-  "align_sign",
+/* 分组定义：顺序即显示顺序；desc 来自 GET /api/force_config 的 fields 元数据 */
+const FORCE_CONFIG_GROUPS = [
+  { title: "钻孔调速（力-速度跟随）", keys: [
+    "default_target_force_n", "contact_threshold_n", "deadband_n",
+    "default_ov_pro", "ov_pro_slew_pct", "max_force_n",
+    "trip_clear_s", "contact_lost_s",
+  ]},
+  { title: "凿击横向让位", keys: [
+    "chisel_lateral_deadband_n", "chisel_lateral_gain_mm_per_s_per_n",
+    "chisel_lateral_max_mm", "chisel_lateral_trip_n", "chisel_lateral_sign",
+    "chisel_lateral_median_window", "chisel_lateral_lpf_hz",
+  ]},
+  { title: "轴线对中", keys: [
+    "align_drill_enable", "align_chisel_enable", "align_deadband_nm",
+    "align_gain_deg_per_s_per_nm", "align_per_cycle_max_deg", "align_max_deg",
+    "align_trip_nm", "align_sign", "align_median_window", "align_lpf_hz",
+  ]},
+  { title: "信号滤波", keys: [
+    "tcp_filter_enable", "tcp_filter_median_window", "tcp_filter_lpf_hz",
+    "filter_median_window", "filter_protect_window", "filter_lpf_hz",
+  ]},
+  { title: "轴与符号（结构参数，改动须重验方向）", keys: [
+    "axis", "press_sign", "press_motion_sign",
+  ]},
+  { title: "叠加测试 / 限幅（高级）", keys: [
+    "per_cycle_max_mm", "cumulative_max_mm", "kp_mm_per_s_per_n",
+    "ki_mm_per_s2_per_n", "integral_limit_n_s", "advance_speed_mm_s",
+    "search_speed_mm_s", "search_before_contact", "path_feed_mm_s", "path_feed_hold_s",
+  ]},
 ];
 
+let forceFieldsMeta = {};   // key -> {desc,type,min,max,options}
+
+function fieldLabel(key) {
+  return key
+    .replace(/^fc_/, "")
+    .replace(/_n$/, " (N)")
+    .replace(/_nm$/, " (N·m)")
+    .replace(/_mm$/, " (mm)")
+    .replace(/_deg$/, " (°)")
+    .replace(/_hz$/, " (Hz)")
+    .replace(/_s$/, " (s)")
+    .replace(/_pct$/, " (%)")
+    .replace(/_n_per_n$/, "")
+    .replace(/_/g, " ");
+}
+
+function buildForceConfigForm() {
+  const host = document.getElementById("force-config-groups");
+  if (!host) return;
+  host.innerHTML = "";
+  for (const group of FORCE_CONFIG_GROUPS) {
+    const section = document.createElement("details");
+    section.className = "param-group";
+    const summary = document.createElement("summary");
+    summary.textContent = group.title;
+    section.appendChild(summary);
+    const grid = document.createElement("div");
+    grid.className = "param-form";
+    for (const key of group.keys) {
+      const meta = forceFieldsMeta[key];
+      const label = document.createElement("label");
+      label.className = meta && meta.type === "bool" ? "check" : "";
+      const span = document.createElement("span");
+      span.textContent = fieldLabel(key);
+      label.appendChild(span);
+      let input;
+      if (meta && meta.type === "bool") {
+        input = document.createElement("input");
+        input.type = "checkbox";
+      } else if (meta && meta.options) {
+        input = document.createElement("select");
+        for (const opt of meta.options) {
+          const o = document.createElement("option");
+          o.value = opt;
+          o.textContent = opt;
+          input.appendChild(o);
+        }
+      } else {
+        input = document.createElement("input");
+        input.type = "number";
+        if (meta) {
+          input.min = meta.min;
+          input.max = meta.max;
+          input.step = (meta.max - meta.min) > 20 ? 1 : (meta.max - meta.min) > 2 ? 0.1 : 0.005;
+        }
+      }
+      input.id = "fc-" + key;
+      if (meta) input.title = meta.desc;   // 悬停显示参数意义
+      label.appendChild(input);
+      grid.appendChild(label);
+    }
+    section.appendChild(grid);
+    host.appendChild(section);
+  }
+  // 默认展开前四组（常用）
+  host.querySelectorAll("details").forEach((d, i) => { d.open = i < 4; });
+}
+
 function applyForceConfig(fc) {
-  for (const key of FORCE_CONFIG_KEYS) {
-    if (!(key in fc)) continue;
-    const el = document.getElementById("fc-" + key);
-    if (!el) continue;
-    if (el.type === "checkbox") el.checked = !!fc[key];
-    else el.value = fc[key];
+  for (const group of FORCE_CONFIG_GROUPS) {
+    for (const key of group.keys) {
+      if (!(key in fc)) continue;
+      const el = document.getElementById("fc-" + key);
+      if (!el) continue;
+      if (el.type === "checkbox") el.checked = !!fc[key];
+      else el.value = fc[key];
+    }
   }
 }
 
 async function loadForceConfig() {
   try {
     const data = await fetchJSON("/api/force_config");
+    forceFieldsMeta = data.fields || {};
+    buildForceConfigForm();
     applyForceConfig(data.force_control || {});
   } catch { /* 力控未启用或服务不可达时静默 */ }
 }
@@ -551,18 +638,20 @@ async function loadForceConfig() {
 async function saveForceConfig() {
   const info = document.getElementById("force-config-info");
   const payload = {};
-  for (const key of FORCE_CONFIG_KEYS) {
-    const el = document.getElementById("fc-" + key);
-    if (!el) continue;
-    let raw;
-    if (el.type === "checkbox") raw = el.checked;
-    else if (el.tagName === "SELECT") raw = parseInt(el.value, 10);
-    else raw = parseFloat(el.value);
-    if (typeof raw !== "boolean" && !Number.isFinite(raw)) {
-      info.textContent = "参数无效：" + key;
-      return;
+  for (const group of FORCE_CONFIG_GROUPS) {
+    for (const key of group.keys) {
+      const el = document.getElementById("fc-" + key);
+      if (!el) continue;
+      let raw;
+      if (el.type === "checkbox") raw = el.checked;
+      else if (el.tagName === "SELECT") raw = el.value;
+      else raw = parseFloat(el.value);
+      if (typeof raw !== "boolean" && typeof raw !== "string" && !Number.isFinite(raw)) {
+        info.textContent = "参数无效：" + key;
+        return;
+      }
+      payload[key] = raw;
     }
-    payload[key] = raw;
   }
   info.textContent = "保存中…";
   try {

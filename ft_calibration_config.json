@@ -66,15 +66,15 @@
     "chisel_lateral_lpf_hz": 4.0,
     "align_chisel_enable": false,
     "align_drill_enable": true,
-    "align_deadband_nm": 3.0,
+    "align_deadband_nm": 5.0,
     "align_gain_deg_per_s_per_nm": 0.05,
     "align_max_deg": 5.0,
-    "align_trip_nm": 30.0,
+    "align_trip_nm": 45.0,
     "align_sign": -1,
     "tcp_filter_enable": true,
     "tcp_filter_median_window": 5,
     "tcp_filter_lpf_hz": 20.0,
-    "align_per_cycle_max_deg": 0.005
+    "align_per_cycle_max_deg": 0.05
   },
   "files": {
     "calibration_path": "ft_calibration.json",

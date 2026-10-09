@@ -37,25 +37,61 @@ SSE_INTERVAL_S = 0.1
 # read_series points 参数上限
 SERIES_MAX_POINTS = 10000
 
-# 力控参数在线设定白名单：键 -> (下限, 上限, 类型, 中文名)。
-# 凿击横向让位 + 轴线零力矩对中（B←My、C←Mz）+ 默认目标力；方向符号只允许 ±1。
-FORCE_CONFIG_FIELDS: dict[str, tuple[float, float, type, str]] = {
-    "default_target_force_n": (0.0, 150.0, float, "默认目标力 (N)"),
-    "chisel_lateral_deadband_n": (0.0, 100.0, float, "横向让位启动阈值 (N)"),
-    "chisel_lateral_gain_mm_per_s_per_n": (0.001, 1.0, float, "横向让位增益 (mm/s/N)"),
-    "chisel_lateral_max_mm": (0.5, 20.0, float, "横向让位行程上限 (mm)"),
-    "chisel_lateral_trip_n": (20.0, 200.0, float, "横向卡滞保护阈值 (N)"),
-    "chisel_lateral_sign": (-1.0, 1.0, int, "横向让位方向符号"),
-    "align_chisel_enable": (False, True, bool, "凿击轴线对中开关"),
-    "align_drill_enable": (False, True, bool, "钻孔轴线对中开关"),
-    "align_deadband_nm": (0.1, 15.0, float, "对中力矩死区 (N·m)"),
-    "align_gain_deg_per_s_per_nm": (0.01, 2.0, float, "对中增益 (°/s/N·m)"),
-    "align_max_deg": (0.5, 5.0, float, "对中累计限幅 (°)"),
-    "align_trip_nm": (2.0, 30.0, float, "对中力矩保护 (N·m)"),
-    "align_sign": (-1.0, 1.0, int, "对中方向符号"),
-    "tcp_filter_enable": (False, True, bool, "TCP 力入口滤波开关"),
-    "tcp_filter_median_window": (1, 15, float, "入口滤波中值窗口(帧)"),
-    "tcp_filter_lpf_hz": (1.0, 100.0, float, "入口滤波低通(Hz)"),
+# 力控参数在线设定白名单：键 -> {min,max,type,desc[,options]}。
+# 全部 force_control 参数均可在线修改（cycle_s/rkorr_frame 除外：与 RSI 链路绑定）。
+# desc 同时作为前端 tooltip 与参数意义说明。
+FORCE_CONFIG_FIELDS: dict[str, dict] = {
+    # ---- 钻孔调速（$OV_PRO 力-速度跟随） ----
+    "default_target_force_n": {"min": 0.0, "max": 150.0, "type": float, "desc": "默认目标压紧力 (N)：调速映射的停止点；机器人未通过 RSI 下发 target_force 时使用"},
+    "contact_threshold_n": {"min": 3.0, "max": 50.0, "type": float, "desc": "接触判定阈值 (N)：滤波力低于此值视为未接触，OV_PRO 回满速；须高于空载残差"},
+    "deadband_n": {"min": 0.0, "max": 20.0, "type": float, "desc": "力误差死区 (N)：仅 overlay 叠加测试路径使用，钻孔调速不用"},
+    "default_ov_pro": {"min": 50.0, "max": 100.0, "type": float, "desc": "空载/非调速态回发的 $OV_PRO (%)"},
+    "ov_pro_slew_pct": {"min": 0.5, "max": 10.0, "type": float, "desc": "倍率每拍最大变化 (%/拍)：100→0 约 200ms；越小越平缓、越大响应越快"},
+    "max_force_n": {"min": 20.0, "max": 300.0, "type": float, "desc": "钻轴超力保护阈值 (N)：滤波值超过即锁存并全速退刀；须高于正常作业峰值×余量"},
+    "trip_clear_s": {"min": 0.05, "max": 2.0, "type": float, "desc": "保护解除时间 (s)：连续卸荷这么久才解锁，弹跳过零不得立即解锁"},
+    "contact_lost_s": {"min": 0.004, "max": 0.2, "type": float, "desc": "接触丢失判定 (s)：力回落这么久才判离（30Hz 弹跳滤波窗口）"},
+    # ---- 轴与符号（结构参数，改动需重验方向） ----
+    "axis": {"type": str, "options": ["X", "Y", "Z"], "desc": "钻轴通道：进给/压紧力所在的工具轴。切换后横向让位与对中通道自动重映射并复位叠加"},
+    "press_sign": {"min": -1, "max": 1, "type": int, "desc": "压紧读数符号：压紧时钻轴读数为负则 -1（现场已验证，勿改）"},
+    "press_motion_sign": {"min": -1, "max": 1, "type": int, "desc": "进给运动方向：+1 = 沿钻轴正向进给、反向退刀（现场已验证，勿改）"},
+    # ---- 叠加测试路径（overlay，钻孔不用） ----
+    "kp_mm_per_s_per_n": {"min": 0.0, "max": 2.0, "type": float, "desc": "叠加测试比例增益 (mm/s)/N：仅 overlay 模式"},
+    "ki_mm_per_s2_per_n": {"min": 0.0, "max": 5.0, "type": float, "desc": "叠加测试积分增益：仅 overlay 模式"},
+    "integral_limit_n_s": {"min": 0.0, "max": 500.0, "type": float, "desc": "积分限幅 (N·s)：抗饱和"},
+    # ---- 平移限幅（安全关键） ----
+    "per_cycle_max_mm": {"min": 0.005, "max": 0.2, "type": float, "desc": "RKorr 单拍平移增量限幅 (mm/拍)：0.08=20mm/s；与机器人 PosCorr 限位对应"},
+    "cumulative_max_mm": {"min": 10.0, "max": 80.0, "type": float, "desc": "平移叠加总量限幅 (mm)：必须 ≤ 机器人侧 PosCorrMon.MaxTrans=80"},
+    "advance_speed_mm_s": {"min": 0.5, "max": 20.0, "type": float, "desc": "叠加测试加压速度上限 (mm/s)"},
+    "search_speed_mm_s": {"min": 0.5, "max": 20.0, "type": float, "desc": "空走搜索速度 (mm/s)：仅打磨模式（search_before_contact 开）"},
+    "search_before_contact": {"type": bool, "desc": "未接触时主动找表面（打磨=True；钻孔=False 路径自行进给）"},
+    "path_feed_mm_s": {"min": 1.0, "max": 50.0, "type": float, "desc": "编程进给速度估计 (mm/s)：须与 KRL $VEL.CP 一致，供叠加测试抵消进给"},
+    "path_feed_hold_s": {"min": 0.0, "max": 1.0, "type": float, "desc": "弹跳窗口内保持进给抵消的时间 (s)"},
+    # ---- 凿击横向让位 ----
+    "chisel_lateral_deadband_n": {"min": 0.0, "max": 100.0, "type": float, "desc": "横向让位启动阈值 (N)：须高于空载残差否则空载慢漂"},
+    "chisel_lateral_gain_mm_per_s_per_n": {"min": 0.001, "max": 1.0, "type": float, "desc": "横向让位速度增益 (mm/s)/N：只作用于超出死区部分"},
+    "chisel_lateral_max_mm": {"min": 0.5, "max": 20.0, "type": float, "desc": "横向让位单轴行程上限 (mm)：内部仍受 80mm 总限"},
+    "chisel_lateral_trip_n": {"min": 20.0, "max": 200.0, "type": float, "desc": "横向卡滞保护阈值 (N)：超过判卡死、沿 -钻轴 全速退刀闩锁"},
+    "chisel_lateral_sign": {"min": -1, "max": 1, "type": int, "desc": "横向让位方向符号（×读数方向）：实机手扳标定值 -1，换传感器须重标"},
+    "chisel_lateral_median_window": {"min": 3, "max": 31, "type": float, "desc": "横向让位中值窗口 (帧)：压掉单次凿击冲击尖峰"},
+    "chisel_lateral_lpf_hz": {"min": 0.5, "max": 20.0, "type": float, "desc": "横向让位低通截止 (Hz)：只追持续卡滞力"},
+    # ---- 轴线零力矩对中 ----
+    "align_chisel_enable": {"type": bool, "desc": "凿击中开轴线对中（叠加在横向让位之上）"},
+    "align_drill_enable": {"type": bool, "desc": "钻孔中开轴线对中（治钻轴与作业面不垂直）"},
+    "align_deadband_nm": {"min": 0.1, "max": 15.0, "type": float, "desc": "对中力矩死区 (N·m)：须高于作业姿态的空载力矩残差"},
+    "align_gain_deg_per_s_per_nm": {"min": 0.01, "max": 2.0, "type": float, "desc": "对中速度增益 (°/s)/N·m：长臂工具建议 ≤0.05 防激振"},
+    "align_per_cycle_max_deg": {"min": 0.005, "max": 0.05, "type": float, "desc": "对中单拍旋转限幅 (°/拍)：实测低于 0.005 机器人不执行；0.65m 臂下 0.01°/拍≈端部 2.5°/s"},
+    "align_max_deg": {"min": 0.5, "max": 5.0, "type": float, "desc": "对中累计角度限幅 (°)：机器人侧旋转限位很宽，必须上位机钳"},
+    "align_trip_nm": {"min": 2.0, "max": 60.0, "type": float, "desc": "力矩卡滞保护阈值 (N·m)：滤波值超过即沿 -钻轴 退刀闩锁；须高于正常作业力矩×余量"},
+    "align_sign": {"min": -1, "max": 1, "type": int, "desc": "对中方向符号（×力矩方向）：实机标定值 -1"},
+    "align_median_window": {"min": 3, "max": 31, "type": float, "desc": "对中力矩中值窗口 (帧)"},
+    "align_lpf_hz": {"min": 0.5, "max": 20.0, "type": float, "desc": "对中力矩低通截止 (Hz)"},
+    # ---- 信号滤波 ----
+    "filter_median_window": {"min": 1, "max": 31, "type": float, "desc": "钻轴力控中值窗口 (帧)"},
+    "filter_protect_window": {"min": 1, "max": 15, "type": float, "desc": "接触判定短中值窗口 (帧)"},
+    "filter_lpf_hz": {"min": 0.5, "max": 50.0, "type": float, "desc": "钻轴力控低通截止 (Hz)：压掉 ~30Hz 弹跳"},
+    "tcp_filter_enable": {"type": bool, "desc": "TCP 力/力矩入口滤波开关：显示/控制/CSV 的 tcp 列共用；关掉后 EMI 尖峰会裸露"},
+    "tcp_filter_median_window": {"min": 1, "max": 15, "type": float, "desc": "入口滤波中值窗口 (帧)：杀 1~2 帧尖峰"},
+    "tcp_filter_lpf_hz": {"min": 1.0, "max": 100.0, "type": float, "desc": "入口滤波低通截止 (Hz)：保真实动态只去高频噪声"},
 }
 
 # 调试台固定输出：RKorr 每拍增量平移上限取现场 per_cycle_max_mm（与力控一致），
@@ -596,7 +632,18 @@ class WebMonitor:
                 if fc is None:
                     self._send_error_json(HTTPStatus.CONFLICT, "力控配置不可用（服务未加载 calibration_config）")
                     return
-                self._send_json(self._force_config_payload(fc))
+                payload = self._force_config_payload(fc)
+                payload["fields"] = {
+                    key: {
+                        "desc": spec["desc"],
+                        "type": spec["type"].__name__,
+                        **({"min": spec["min"], "max": spec["max"]}
+                           if spec["type"] not in (bool, str) else {}),
+                        **({"options": spec["options"]} if "options" in spec else {}),
+                    }
+                    for key, spec in FORCE_CONFIG_FIELDS.items()
+                }
+                self._send_json(payload)
 
             def _handle_force_config_post(self) -> None:
                 # 先把请求体读完再应答：未读数据会导致关闭时 RST（Windows 10053），
@@ -635,30 +682,40 @@ class WebMonitor:
                         HTTPStatus.BAD_REQUEST, f"不在白名单的参数：{', '.join(unknown)}"
                     )
                     return
-                cleaned: dict[str, float | int | bool] = {}
+                cleaned: dict[str, float | int | bool | str] = {}
                 for key, value in updates.items():
-                    low, high, cast, _ = FORCE_CONFIG_FIELDS[key]
-                    if cast is bool:
-                        # 布尔开关：只接受真布尔（数值 0/1 不收，避免语义歧义）
+                    spec = FORCE_CONFIG_FIELDS[key]
+                    kind = spec["type"]
+                    if kind is bool:
                         if not isinstance(value, bool):
                             self._send_error_json(HTTPStatus.BAD_REQUEST, f"{key} 须为布尔值")
                             return
                         cleaned[key] = value
                         continue
+                    if kind is str:
+                        text = str(value).upper()
+                        if text not in spec.get("options", []):
+                            self._send_error_json(
+                                HTTPStatus.BAD_REQUEST,
+                                f"{key} 须为 {'/'.join(spec.get('options', []))}")
+                            return
+                        cleaned[key] = text
+                        continue
                     if isinstance(value, bool):
                         self._send_error_json(HTTPStatus.BAD_REQUEST, f"{key} 须为数值")
                         return
                     try:
-                        typed = cast(value)
+                        typed = kind(value)
                     except (TypeError, ValueError):
                         self._send_error_json(HTTPStatus.BAD_REQUEST, f"{key} 须为数值")
                         return
-                    if key in ("chisel_lateral_sign", "align_sign") and typed == 0:
+                    if key.endswith("_sign") and typed == 0:
                         self._send_error_json(HTTPStatus.BAD_REQUEST, f"{key} 只允许 1 或 -1")
                         return
-                    if not low <= typed <= high:
+                    if not spec["min"] <= typed <= spec["max"]:
                         self._send_error_json(
-                            HTTPStatus.BAD_REQUEST, f"{key}={value} 超出范围 [{low}, {high}]"
+                            HTTPStatus.BAD_REQUEST,
+                            f"{key}={value} 超出范围 [{spec['min']}, {spec['max']}]",
                         )
                         return
                     cleaned[key] = typed

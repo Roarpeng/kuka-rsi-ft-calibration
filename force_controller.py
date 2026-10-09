@@ -85,6 +85,7 @@ class ForceController:
         # 垂直于钻轴的两轴：横向让位（平移）与对中（力矩->同轴旋转）都跟随钻轴推导。
         # 例：axis=X -> Y/Z + My/Mz->B/C；axis=Z -> X/Y + Mx/My->A/B。
         self.perp = [i for i in range(3) if i != self.axis_index]
+        self._axis_cached = config.axis.upper()  # 钻轴在线切换时自动重映射+复位
         self.integral_n_s = 0.0
         self.corr_cumulative_mm = [0.0, 0.0, 0.0]  # 输出坐标系总偏移（不下发，限幅/路径估计用）
         self.force_filter = _ForceAxisFilter(
@@ -218,6 +219,17 @@ class ForceController:
     ) -> dict[str, float]:
         cfg = self.config
         zero = {f"RKorr.{axis}": 0.0 for axis in "XYZABC"}
+
+        # 钻轴在线切换（Web）：重映射横向/对中通道并复位叠加/滤波（坐标系变了旧叠加无意义）
+        axis_now = cfg.axis.upper()
+        if axis_now != self._axis_cached:
+            self._axis_cached = axis_now
+            self.axis_index = AXIS_INDEX[axis_now]
+            self.perp = [i for i in range(3) if i != self.axis_index]
+            self.reset()
+            message = f"[力控] 钻轴切换为 {axis_now}，横向/对中通道已重映射，叠加已复位"
+            print(message)
+            self._emit_event("warning", message)
 
         if mode != self._last_mode:
             # 模式切换（钻孔<->凿击等）清横向/对中滤波历史，避免旧模式残值串扰

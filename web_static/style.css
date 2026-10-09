@@ -609,3 +609,25 @@ button:hover, .btn:hover { background: var(--panel-2); border-color: var(--ink-3
 @media (prefers-reduced-motion: reduce) {
   .lamp i, .cycle-dot { transition: none; }
 }
+
+/* 参数分组折叠面板 */
+.param-group {
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  margin-bottom: 10px;
+  background: var(--bg);
+}
+
+.param-group summary {
+  cursor: pointer;
+  padding: 7px 10px;
+  font-size: 12.5px;
+  color: var(--ink-2);
+  user-select: none;
+}
+
+.param-group summary:hover { color: var(--kuka); }
+
+.param-group .param-form { padding: 4px 10px 10px; }
+
+.param-group label[title] { position: relative; }

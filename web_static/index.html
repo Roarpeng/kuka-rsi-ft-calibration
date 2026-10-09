@@ -124,39 +124,11 @@
 
         <section class="panel">
           <h2>凿击让位参数</h2>
-          <form class="param-form" id="force-config-form" autocomplete="off">
-            <label>目标力 N<input type="number" id="fc-default_target_force_n" step="1" min="0" max="150"></label>
-            <label>让位阈值 N<input type="number" id="fc-chisel_lateral_deadband_n" step="1" min="0" max="100"></label>
-            <label>行程上限 mm<input type="number" id="fc-chisel_lateral_max_mm" step="0.5" min="0.5" max="20"></label>
-            <label>卡滞保护 N<input type="number" id="fc-chisel_lateral_trip_n" step="5" min="20" max="200"></label>
-            <label>让位增益 mm/s/N<input type="number" id="fc-chisel_lateral_gain_mm_per_s_per_n" step="0.01" min="0.001" max="1"></label>
-            <label>让位方向
-              <select id="fc-chisel_lateral_sign">
-                <option value="1">与读数同号（默认）</option>
-                <option value="-1">与读数反号</option>
-              </select>
-            </label>
-            <label class="check">凿击轴线对中
-              <input type="checkbox" id="fc-align_chisel_enable" title="凿击中按 My/Mz 零力矩对中（B/C 旋转，叠加在平移让位之上）">
-            </label>
-            <label class="check">钻孔轴线对中
-              <input type="checkbox" id="fc-align_drill_enable" title="钻孔中按 My/Mz 对中，治 X 轴与作业面不垂直；方向符号未经实机验证前勿开">
-            </label>
-            <label>对中死区 N·m<input type="number" id="fc-align_deadband_nm" step="0.1" min="0.1" max="5"></label>
-            <label>对中增益 °/s/N·m<input type="number" id="fc-align_gain_deg_per_s_per_nm" step="0.01" min="0.01" max="2"></label>
-            <label>对中限幅 °<input type="number" id="fc-align_max_deg" step="0.5" min="0.5" max="5"></label>
-            <label>力矩保护 N·m<input type="number" id="fc-align_trip_nm" step="0.5" min="2" max="30"></label>
-            <label>对中方向
-              <select id="fc-align_sign">
-                <option value="1">与力矩同号（默认）</option>
-                <option value="-1">与力矩反号</option>
-              </select>
-            </label>
-            <div class="param-actions">
-              <button type="button" class="btn primary" id="force-config-save">保存参数</button>
-              <span class="param-info" id="force-config-info"></span>
-            </div>
-          </form>
+          <div id="force-config-groups"><!-- app.js 按分组动态渲染（每参数带意义提示） --></div>
+          <div class="param-actions">
+            <button type="button" class="btn primary" id="force-config-save">保存参数</button>
+            <span class="param-info" id="force-config-info"></span>
+          </div>
           <p class="footnote">凿击中横向力超过阈值时，机械臂顺势让位卸载（最多让位行程上限）；卡滞超阈值沿 -X 退刀。方向符号须实机手推批头实测后再改。</p>
         </section>
 

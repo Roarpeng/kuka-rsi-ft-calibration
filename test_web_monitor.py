@@ -410,6 +410,12 @@ def test_force_config_api() -> None:
             assert on_disk["force_control"]["chisel_lateral_deadband_n"] == 20.0
             assert on_disk["force_control"]["chisel_lateral_max_mm"] == 12.5
 
+            # 钻轴枚举参数可在线切换
+            status, payload = _post_json(port, "/api/force_config", {"axis": "Z"})
+            assert status == 200 and force_config.axis == "Z"
+            status, _ = _post_json(port, "/api/force_config", {"axis": "X"})
+            assert status == 200 and force_config.axis == "X"
+
             # 对中参数（含布尔开关）同样生效并落盘
             status, payload = _post_json(
                 port, "/api/force_config",
@@ -429,7 +435,7 @@ def test_force_config_api() -> None:
 
             # 非法输入全部 400：白名单外 / 超范围 / 符号 0 / 布尔传字符串 / 空对象 / 坏 JSON / 空体
             for bad in (
-                {"axis": "Z"},
+                {"axis": "W"},
                 {"chisel_lateral_max_mm": 50.0},
                 {"chisel_lateral_sign": 0},
                 {"align_chisel_enable": "yes"},
