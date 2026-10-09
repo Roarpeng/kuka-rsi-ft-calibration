@@ -189,7 +189,7 @@ def _frame_snapshot(rsi_data: Any, config: Any) -> dict:
             rsi_data.Act_A, rsi_data.Act_B, rsi_data.Act_C,
         ],
         "sample_status": rsi_data.sample_status,
-        "robot_status": bool(rsi_data.RobotStatus),
+        "robot_status": int(getattr(rsi_data, "RobotStatus", 2)),
         "ov_pro": getattr(config, "ov_pro", None),
         "rkorr": [
             rkorr.get("RKorr.X", 0.0),

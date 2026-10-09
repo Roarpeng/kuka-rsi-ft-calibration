@@ -11,6 +11,8 @@ const CHANNELS_ATT = ["#7BE0A2", "#FF7EB5", "#8FA9FF"];
 
 const REDUCED_MOTION = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 
+let lastRobotStatus = null;
+
 const DEBUG_KEYS = ["x", "y", "z", "a", "b", "c"];
 let limits = { trans_max: 0.08, rot_max: 0.05, cycle_s: 0.004 };
 let enabled = false;      // 服务端当前固定输出状态
@@ -78,6 +80,13 @@ function startStream() {
       if (enabled && refAct) {
         document.getElementById("delta-" + key).textContent = fmtSigned(act[i] - refAct[i], i < 3 ? 2 : 3);
       }
+    }
+    if (frame.robot_status !== undefined && frame.robot_status !== null
+        && frame.robot_status !== lastRobotStatus) {
+      lastRobotStatus = frame.robot_status;
+      if (frame.robot_status === 1) setLamp("lamp-service", "warn", "标定");
+      else if (frame.robot_status === 3) setLamp("lamp-service", "kuka", "凿击");
+      else setLamp("lamp-service", null, "钻孔");
     }
     const tSec = frameTimeSec(frame.timestamp);
     chartPos.push(tSec, act.slice(0, 3));

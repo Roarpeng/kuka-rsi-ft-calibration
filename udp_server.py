@@ -69,7 +69,7 @@ class RSIData:
     iPOC: int = 0
     ipoc_text: str = "0"
     data_collection: bool = False  # 标定采样触发：true 采集，false 不采集
-    RobotStatus: bool = False      # FALSE=钻孔（控 $OV_PRO）；TRUE=凿击（X 恒力 OV_PRO + Y/Z 横向让位）
+    RobotStatus: int = 2           # INT：1=标定 2=钻孔（OV_PRO 力-速度）3=凿击（恒力+横向让位+对中）
     target_force: float = 0.0      # 力控目标力（可选 XML；未带则用配置默认值）
     target_force_present: bool = False  # RSI XML 是否带了 <target_force>；未带则用配置默认值
     sensor_fx: float = 0.0
@@ -118,7 +118,7 @@ SAMPLE_ROB_XML = (
     "<Act_X>903.0</Act_X><Act_Y>-80.5</Act_Y><Act_Z>1213.1</Act_Z>"
     "<Act_A>-83.7</Act_A><Act_B>0.8</Act_B><Act_C>179.8</Act_C>"
     "<data_collection>FALSE</data_collection>"
-    "<RobotStatus>FALSE</RobotStatus>"
+    "<RobotStatus>2</RobotStatus>"
     "<IPOC>123645634563</IPOC>"
     "</Rob>"
 )
@@ -168,7 +168,7 @@ class RSIServer:
         ("Act_B", "DOUBLE", 11),
         ("Act_C", "DOUBLE", 12),
         ("data_collection", "BOOL", 13),
-        ("RobotStatus", "BOOL", 14),  # FALSE=钻孔控倍率；TRUE=凿击（X 恒力 + Y/Z 横向让位）
+        ("RobotStatus", "INT", 14),   # 1=标定；2=钻孔（OV_PRO 力-速度）；3=凿击（恒力+横向让位+对中）
     ]
 
     # 对应机器人 RSI XML 的 RECEIVE/ELEMENTS（上位机 -> 机器人）
@@ -216,6 +216,7 @@ class RSIServer:
         self.force_suspended = False   # 标定期间力控挂起：RKorr=0、OV_PRO=100%
         self.force_requested = False   # 服务以 --force 启动（标定完成后自动恢复力控）
         self._last_data_collection = False  # 上一帧 data_collection，用于上升沿检测
+        self._last_robot_status = 2         # 上一帧 RobotStatus（INT），用于进入标定的沿检测
         # 调试台固定输出（Web /api/debug_override 设置，优先于力控）：
         # enabled/x/y/z/a/b/c（RKorr 每拍增量，mm/°）+ ov_pro（%）。仅此字典为数据源，
         # RSI 重启 / 自动标定会自动置 enabled=False（见 disable_debug_override）。
@@ -331,13 +332,30 @@ class RSIServer:
                 if elem is not None and elem.text:
                     value = elem.text.strip()
                     if elem_type in ("LONG", "INT"):
-                        setattr(rsi_data, tag, int(value))
+                        try:
+                            setattr(rsi_data, tag, int(value))
+                        except ValueError:
+                            if tag == "RobotStatus":
+                                continue  # 旧 BOOL 文本，交给后面的协议兼容映射
+                            raise
                     elif elem_type == "DOUBLE":
                         setattr(rsi_data, tag, float(value))
                     elif elem_type == "BOOL":
                         setattr(rsi_data, tag, value.upper() in ("1", "TRUE", "YES", "ON"))
                 elif elem_type == "BOOL":
                     setattr(rsi_data, tag, False)
+
+            # RobotStatus 协议升级（2026-10-09）：机器人端改为 INT（1=标定 2=钻孔 3=凿击）。
+            # 兼容旧 BOOL 文本：TRUE->3（凿击）/ FALSE->2（钻孔）；缺省 2。
+            rs_elem = root.find(".//RobotStatus")
+            if rs_elem is not None and rs_elem.text:
+                rs_text = rs_elem.text.strip().upper()
+                try:
+                    rsi_data.RobotStatus = int(rs_text)
+                except ValueError:
+                    rsi_data.RobotStatus = 3 if rs_text in ("TRUE", "YES", "ON") else 2
+            else:
+                rsi_data.RobotStatus = 2
 
             # 可选：XML 另加 <target_force> 时可在线改目标力；当前机器人 SEND 无此标签
             tf_elem = root.find(".//target_force")
@@ -403,9 +421,10 @@ class RSIServer:
         """换工具重标定：data_collection 的 FALSE->TRUE 上升沿触发（任何模式），
         自动清空旧样本并进入标定模式（服务无需重启/改模式）。
         必须用上升沿而非电平：求解完成当拍该段残留的 TRUE 不得重新触发。"""
+        data_collection_rise = rsi_data.data_collection and not self._last_data_collection
+        robot_status_enter_calib = rsi_data.RobotStatus == 1 and self._last_robot_status != 1
         if (
-            not rsi_data.data_collection
-            or self._last_data_collection
+            not (data_collection_rise or robot_status_enter_calib)
             or self.auto_calibrating
             or self.calibration_config is None
             or self.calibration_runner is None
@@ -416,7 +435,8 @@ class RSIServer:
         self.calibration_runner.last_sample_angles = None
         self.calibration_config.mode = "calibration_collect"
         self.auto_calibrating = True
-        message = "[标定] 检测到标定程序信号（data_collection=TRUE），自动进入标定模式"
+        source = "RobotStatus=1" if robot_status_enter_calib else "data_collection=TRUE"
+        message = f"[标定] 检测到标定程序信号（{source}），自动进入标定模式"
         print(message)
         self._emit_event("info", message)
         # 标定走固定姿态，调试固定输出必须让位
@@ -459,6 +479,7 @@ class RSIServer:
     def process_frame(self, rsi_data: RSIData) -> RSIData:
         self._check_auto_calibration(rsi_data)
         self._last_data_collection = rsi_data.data_collection
+        self._last_robot_status = rsi_data.RobotStatus
         frame = {
             "timestamp": rsi_data.timestamp,
             "iPOC": rsi_data.iPOC,
@@ -530,7 +551,7 @@ class RSIServer:
                     if self.force_controller is not None
                     else [0.0, 0.0, 0.0]
                 ),
-                1 if rsi_data.RobotStatus else 0,
+                rsi_data.RobotStatus,
                 self.config.ov_pro,
             ]
             self.csv_writer.writerow(row)
@@ -647,7 +668,7 @@ class RSIServer:
             tcp_angles_deg=[rsi_data.Act_A, rsi_data.Act_B, rsi_data.Act_C],
             target_force_n=target,
             tcp_position_mm=[rsi_data.Act_X, rsi_data.Act_Y, rsi_data.Act_Z],
-            mode="chisel" if rsi_data.RobotStatus else "drill",
+            mode="chisel" if rsi_data.RobotStatus == 3 else "drill",
             torque_tcp=[rsi_data.tcp_mx, rsi_data.tcp_my, rsi_data.tcp_mz],
         )
         self.config.rkorr.update(rkorr)
@@ -674,7 +695,7 @@ class RSIServer:
             parsed.Fx_raw == 100
             and parsed.Act_C == 179.8
             and parsed.ipoc_text == "123645634563"
-            and parsed.RobotStatus is False
+            and parsed.RobotStatus == 2
             and f'Type="{self.config.SENTYPE}"' in reply
             and "<RKorr " in reply
             and rkorr_text_ok
@@ -906,7 +927,7 @@ class RSIServer:
                             print(f"  Act_A={rsi_data.Act_A:.3f}, Act_B={rsi_data.Act_B:.3f}, Act_C={rsi_data.Act_C:.3f}")
                             print(
                                 f"  data_collection={rsi_data.data_collection}  "
-                                f"RobotStatus={'凿击' if rsi_data.RobotStatus else '钻孔'}"
+                                f"RobotStatus={rsi_data.RobotStatus}"
                             )
                             print(f"  Sensor(N/Nm)=({rsi_data.sensor_fx:.3f}, {rsi_data.sensor_fy:.3f}, {rsi_data.sensor_fz:.3f}, {rsi_data.sensor_mx:.3f}, {rsi_data.sensor_my:.3f}, {rsi_data.sensor_mz:.3f})")
                             print(f"  TCP补偿后(N/Nm)=({rsi_data.tcp_fx:.3f}, {rsi_data.tcp_fy:.3f}, {rsi_data.tcp_fz:.3f}, {rsi_data.tcp_mx:.3f}, {rsi_data.tcp_my:.3f}, {rsi_data.tcp_mz:.3f})")
@@ -985,7 +1006,7 @@ def create_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--force",
         action="store_true",
-        help="启动力控模式：重力补偿 + 恒力钻孔（RobotStatus=FALSE 控 OV_PRO；TRUE 凿击横向让位）"
+        help="启动力控模式（RobotStatus: 1=标定 2=钻孔控OV_PRO 3=凿击恒力+横向让位）"
     )
     parser.add_argument(
         "--ip",
@@ -1094,7 +1115,7 @@ def main():
         print(f"力滤波：中值 {fc.filter_median_window} 帧 + 低通 {fc.filter_lpf_hz} Hz")
         print(f"路径进给补偿：{fc.path_feed_mm_s} mm/s（须与 $VEL.CP 一致）")
         print(f"限幅：每拍增量 ±{fc.per_cycle_max_mm} mm（PosCorr），累积 ±{fc.cumulative_max_mm} mm（POSCORRMON），超力保护 {fc.max_force_n} N")
-        print(f"倍率：RobotStatus=FALSE 钻孔按力映射 $OV_PRO 0–100%（每拍 ≤{fc.ov_pro_slew_pct:.1f}%）")
+        print(f"倍率：RobotStatus=2 钻孔按力映射 $OV_PRO 0–100%（每拍 ≤{fc.ov_pro_slew_pct:.1f}%）；1=自动标定；3=凿击")
         print(f"凿击（TRUE）：X 仍 OV_PRO 恒力；Y/Z 横向让位阈值 {fc.chisel_lateral_deadband_n} N、行程 ±{fc.chisel_lateral_max_mm} mm、卡滞保护 {fc.chisel_lateral_trip_n} N、方向符号 {fc.chisel_lateral_sign:+d}（横向调节期间 X 恒力冻结）")
         print(f"轴线对中（B←My、C←Mz）：凿击{'开' if fc.align_chisel_enable else '关'}、钻孔{'开' if fc.align_drill_enable else '关'}；死区 {fc.align_deadband_nm} N·m、增益 {fc.align_gain_deg_per_s_per_nm} °/s/N·m、累计 ±{fc.align_max_deg}°、力矩保护 {fc.align_trip_nm} N·m、方向符号 {fc.align_sign:+d}（符号未经实机验证前勿开启）")
         print("RSI 回包：钻孔 RKorr=0 + OV_PRO（须 RSI_ON(#RELATIVE)；Ethernet Out7→Map2OV_PRO 量程 0–100）\n")

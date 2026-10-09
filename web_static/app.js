@@ -221,10 +221,12 @@ function startStream() {
     try { frame = JSON.parse(ev.data); } catch { return; }
     pulseCycle();
     updateGauges(frame.tcp);
-    if (typeof frame.robot_status === "boolean" && frame.robot_status !== lastRobotStatus) {
+    if (frame.robot_status !== undefined && frame.robot_status !== null
+        && frame.robot_status !== lastRobotStatus) {
       lastRobotStatus = frame.robot_status;
-      setLamp("lamp-chisel", frame.robot_status ? "kuka" : null,
-        frame.robot_status ? "凿击" : "钻孔");
+      if (frame.robot_status === 1) setLamp("lamp-chisel", "warn", "标定");
+      else if (frame.robot_status === 3) setLamp("lamp-chisel", "kuka", "凿击");
+      else setLamp("lamp-chisel", null, "钻孔");
     }
     const tSec = frameTimeSec(frame.timestamp);
     chartForce.push(tSec, frame.tcp.slice(0, 3));

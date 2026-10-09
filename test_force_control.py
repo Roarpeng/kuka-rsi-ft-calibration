@@ -224,14 +224,14 @@ xml_drill = udp_server.SAMPLE_ROB_XML  # FALSE=钻孔
 parsed_drill = udp_server.RSIServer(udp_server.RSIConfig()).parse_rsi_xml(
     xml_drill.encode("utf-8")
 )
-assert parsed_drill is not None and parsed_drill.RobotStatus is False
+assert parsed_drill is not None and parsed_drill.RobotStatus == 2
 xml_chisel = udp_server.SAMPLE_ROB_XML.replace(
-    "<RobotStatus>FALSE</RobotStatus>", "<RobotStatus>TRUE</RobotStatus>"
+    "<RobotStatus>2</RobotStatus>", "<RobotStatus>3</RobotStatus>"
 )
 parsed_chisel = udp_server.RSIServer(udp_server.RSIConfig()).parse_rsi_xml(
     xml_chisel.encode("utf-8")
 )
-assert parsed_chisel is not None and parsed_chisel.RobotStatus is True
+assert parsed_chisel is not None and parsed_chisel.RobotStatus == 3
 idle_ov = 100.0
 for _ in range(5):
     rk = ctrl.update([-8.0, 0.0, 0.0], ANGLES, target, mode="drill")

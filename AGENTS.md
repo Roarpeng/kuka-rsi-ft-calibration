@@ -78,7 +78,7 @@ Ubuntu 生产部署：`sudo bash deploy/install.sh`（装到 `/opt/kuka-rsi`，s
 
 `udp_server.py` 的 `SEND_ELEMENTS`/`RECEIVE_ELEMENTS`、机器人侧 `RSIEthernet.xml`（见 `RSIEthernet.snippet.xml`）、README 的字段表，三者字段、顺序、类型必须一致。
 
-- SEND（机器人→上位机）：`Fx_raw~Mz_raw`(LONG 1–6)、`Act_X~C`(DOUBLE 7–12)、`data_collection`(BOOL 13)、`RobotStatus`(BOOL 14，**必须是 BOOL 不要用 INT**)。
+- SEND（机器人→上位机）：`Fx_raw~Mz_raw`(LONG 1–6)、`Act_X~C`(DOUBLE 7–12)、`data_collection`(BOOL 13)、`RobotStatus`(**INT 14：1=标定自动触发 / 2=钻孔 OV_PRO 力-速度 / 3=凿击恒力+横向让位+对中**；旧 BOOL 文本 TRUE→3、FALSE→2 兼容)。
 - RECEIVE（上位机→机器人）：`RKorr.X~C`(DOUBLE 1–6，HOLDON=0)、`OV_PRO`(DOUBLE 7，Ethernet Out7→Map2OV_PRO，量程 0–100%)。
 - 回包 `IPOC` 必须与收包一致，否则包无效；`RKorr.X` 写成属性形式 `<RKorr X="..." />`。
 
@@ -92,7 +92,7 @@ Ubuntu 生产部署：`sudo bash deploy/install.sh`（装到 `/opt/kuka-rsi`，s
 - **本机传感器符号（2026-10-08 手扳标定 + 2026-10-09 三方向 40/50/30N 推力复核）**：法兰系下 Y/Z 通道**力与力矩整体反号**（+Y 扳动实测 Fy=−78/Mz=−6.8，+Z 扳动实测 Fz=−287/My=+19.6，等效传感器绕 X 转 180°；X 通道不受影响，故 X 轴力控一直正常，重力矩阵已吸收此旋转）。因此 **`chisel_lateral_sign=-1`、`align_sign=-1`**（已写入配置）。勿改 `sensor_to_flange.rotation_deg` 来"纠正"——现有标定是在当前配置下拟合的，改变换须重标定。另：空载 My 残差实测 +2.4 N·m，**对中死区须高于该残差**（暂设 ≥3 N·m 或先排查残差）再开对中。
 - `contact_threshold_n=20` 高于空载残差（5~12N 漂移）才不误判接触。
 - 收包中断 >1s 判定 RSI 重启，`udp_server.py` 自动 `ForceController.reset()`（机器人叠加归零，PC 累积须同步清零）。
-- 关 RSI 前必须先退刀让 `OV_PRO` 回到 100%，避免 `$OV_PRO` 停在 0；`RobotStatus=TRUE` 是凿击模式，不是"结束钻孔"。
+- 关 RSI 前必须先退刀让 `OV_PRO` 回到 100%，避免 `$OV_PRO` 停在 0；`RobotStatus=3` 是凿击模式，不是"结束钻孔"。
 - 超力保护 `max_force_n=150` 用滤波通道锁存（EMI 尖峰 1~3 帧可达 ±150N 级，原始值会连续误触发、实测一轮 62/18 次），过零不立即解锁（须连续卸荷 `trip_clear_s`）。调速与停止判断同样用滤波通道（中值+低通，实测均值 30N 时原始值判据 OV 有 98% 时间为 0）。
 - **凿击（`RobotStatus=TRUE`）横向让位**：Y/Z 对持续横向力做零力让位（慢通道滤波 + 死区 + 比例漂移）。让位方向 = `chisel_lateral_sign` × 读数方向（读数=工件对工具作用力，同号让位即背离障碍物卸载）；**符号位必须实机手推批头实测后才能改**，搞反即横向正反馈（顶墙）。死区 `chisel_lateral_deadband_n=15N` 必须高于空载残差 5~12N，否则空载慢漂。单轴让位上限 `chisel_lateral_max_mm=20mm`（Web 可设），内部仍受 80mm PosCorrMon 总限。横向原始力超 `chisel_lateral_trip_n=100N` 判卡滞：沿 -X 全速退刀并闩锁（复用超力解锁规则）。横向让位期间 X 轴恒力（OV_PRO）冻结、横向撤销后恢复；切回钻孔时横向叠加按每拍限幅缓撤到 0。
 - **调试台固定输出（`/debug.html` → `server.debug_override`）**：会真实移动机械臂，仅限联调。平移限幅 = `per_cycle_max_mm`（±0.08mm/拍）、旋转 ±0.05°/拍、OV_PRO 0–100，Web 层与服务端双重校验。优先于力控；**RSI 收包中断 >1s 或 `data_collection` 上升沿（自动标定）会自动停用**（RKorr=0、OV_PRO=100%、力控器复位）。停止后发 0 只保持叠加不撤销偏移（#RELATIVE 语义）。

@@ -148,7 +148,7 @@ journalctl -u kuka-rsi -f        # 日志
 | 7–9 | Act_X ~ Act_Z | DOUBLE | TCP 位置 (mm) |
 | 10–12 | Act_A ~ Act_C | DOUBLE | TCP 姿态 (deg) |
 | 13 | data_collection | BOOL | 标定采样触发 |
-| 14 | RobotStatus | BOOL | FALSE=钻孔（控倍率）；TRUE=凿击（X 恒力 + Y/Z 横向让位） |
+| 14 | RobotStatus | INT | 1=标定（自动触发标定服务）；2=钻孔（OV_PRO 力-速度）；3=凿击（恒力+横向让位+对中） |
 
 RECEIVE（上位机 → 机器人）：
 
