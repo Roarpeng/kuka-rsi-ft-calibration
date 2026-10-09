@@ -1,4 +1,4 @@
-﻿&ACCESS RVP
+&ACCESS RVP
 &REL 3
 &COMMENT Force Sensor Gravity Calibration - Diversified Poses
 DEF FT_Calibration ( )

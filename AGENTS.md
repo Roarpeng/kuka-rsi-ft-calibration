@@ -12,7 +12,7 @@
 
 | 文件 | 职责 |
 |------|------|
-| `udp_server.py` | 主程序入口：UDP 收发、RSI XML 解析/回包生成、CSV 记录、四种模式（`--calibrate`/`--run`/`--force`/默认仅记录）、`--test-link` 链路自检 |
+| `udp_server.py` | 主程序入口：UDP 收发、RSI XML 解析/回包生成、CSV 记录、四种启动模式（`--calibrate`/`--run`/`--force`/默认仅记录）、`--test-link` 链路自检、调试固定输出 `debug_override`（优先于力控）、运行时模式切换 `set_service_mode`（monitor/force，Web 在线切免重启） |
 | `calibration_models.py` | 全部 dataclass 数据结构：配置（`CalibrationConfig`/`ForceControlConfig` 等）、样本、标定结果 |
 | `calibration_io.py` | `ft_calibration_config.json`、标定结果、样本文件的读写 |
 | `calibration_math.py` | 纯数学：欧拉角→旋转矩阵、变换合成、最小二乘（高斯消元）、重力模型拟合 `fit_gravity_model`、补偿 `compensate_wrench` |
@@ -23,13 +23,13 @@
 | `test_auto_calibrate.py` | 自动重标定测试（不起 socket，直驱 `process_frame`）：`data_collection` 上升沿自动进标定、力控挂起/恢复、`--force` 无标定待激活 |
 | `rerun_calibration.py` | 用现有样本离线重跑标定求解，与旧结果对比 |
 | `data_manager.py` | CSV 数据文件管理：白名单校验、列举、锁定/解锁、删除、容量控制 `enforce_capacity`、历史回放 `read_series`（供 Web 层调用） |
-| `web_monitor.py` | Web 监控层（纯标准库 `http.server`）：`start_web_server(server, data_dir, data_cap_mb, port, force_config_path)` 启动 HTTP + SSE 推送，只读监控与文件管理 + `/api/force_config` 力控参数在线设定（白名单+范围校验、实时生效并写回 `ft_calibration_config.json`），**不直接参与控制环** |
-| `web_static/` | 无构建单页监控台（`index.html`/`app.js`/`style.css`），图表用本地化 `vendor/chart.umd.min.js`（Chart.js 4.4.1，现场无外网，勿删） |
+| `web_monitor.py` | Web 监控层（纯标准库 `http.server`）：`start_web_server(server, data_dir, data_cap_mb, port, force_config_path)` 启动 HTTP + SSE 推送，只读监控与文件管理 + `/api/force_config` 力控参数在线设定（白名单+范围校验、实时生效并写回 `ft_calibration_config.json`）+ `/api/debug_override` 调试固定输出设定 + `/api/server_mode` 服务模式在线切换，**不直接参与控制环** |
+| `web_static/` | 无构建单页监控台（`index.html`/`app.js`/`style.css` + 调试台 `debug.html`/`debug.js`），图表用本地化 `vendor/chart.umd.min.js`（Chart.js 4.4.1，现场无外网，勿删） |
 | `test_web_monitor.py` | Web 层测试：data_manager 单测 + Web API 集成（dummy server + http.client） |
 | `deploy/` | Ubuntu 生产部署：`kuka-rsi.service`（systemd，开机自启 + `Restart=always`）、`install.sh`（装到 `/opt/kuka-rsi`） |
 | `analysis_check.py` / `analysis_check2.py` | 一次性离线诊断脚本（需 numpy），用于历史 bug 排查，非正式测试 |
-| `FT_Calibration.src` | KRL：自动走 16 个分散姿态并触发 `RECORD_SAMPLE()` 采样 |
-| `FT_Drilling.src` / `FT_Drilling.dat` | KRL：恒力钻孔程序与全局变量（`RobotStatus`、`target_force`） |
+| `KUKA_SRC/` | KRL 程序集（2026-10-09 重示教点位）：FT_Calibration/FT_Drilling/FT_Chisel 的 SRC/DAT 成对文件 |
+
 | `RSI_Control.src` | KRL：RSI 容器开关，**必须 `RSI_ON(#RELATIVE)`** |
 | `RSIEthernet.snippet.xml` | 与现场一致的 RSI SEND/RECEIVE 元素定义片段 |
 | `KST_RSI_40_zh.pdf` | KUKA RSI 4.0 中文手册（参考资料） |
@@ -45,7 +45,9 @@ python udp_server.py --test-link      # 链路自检：XML 自检 + 回环 + 等
 python udp_server.py --ip 192.168.2.10 --host-ip 192.168.2.250 --port 59152
 ```
 
-Web 监控默认随主程序启动（`web_monitor.py`，端口 `--web-port 8080`，`--no-web` 关闭，`--data-dir`/`--data-cap-mb` 控制数据目录与容量上限）。`web_static/vendor/chart.umd.min.js` 是本地化的 Chart.js，属源码需提交。监控台"力控参数设定"卡片（`GET/POST /api/force_config`）可在线改凿击横向让位阈值/行程上限/卡滞阈值/方向符号与默认目标力，实时生效并持久化。
+命令行参数只决定**启动默认**；监控/力控可在 Web 页面顶栏的"监控/力控"分段开关**运行时切换**（`POST /api/server_mode`），无需重启服务。切换时会停用调试固定输出、复位力控器、RKorr 清零、OV_PRO 回 100%。
+
+Web 监控默认随主程序启动（`web_monitor.py`，端口 `--web-port 8080`，`--no-web` 关闭，`--data-dir`/`--data-cap-mb` 控制数据目录与容量上限）。`web_static/vendor/chart.umd.min.js` 是本地化的 Chart.js，属源码需提交。监控台"力控参数设定"卡片（`GET/POST /api/force_config`）可在线改凿击横向让位阈值/行程上限/卡滞阈值/方向符号、轴线对中开关与参数、默认目标力，实时生效并持久化。`/debug.html` 调试台（`GET/POST /api/debug_override`）可固定下发 RKorr 每拍增量 + OV_PRO 并监控 Act 位姿，用于实机验证方向约定（如 `chisel_lateral_sign`/`align_sign` 手推标定前的方向确认）。
 
 测试（**改动 `force_controller.py`、`udp_server.py` 或 Web 层后四个都必须通过**）：
 
@@ -85,12 +87,16 @@ Ubuntu 生产部署：`sudo bash deploy/install.sh`（装到 `/opt/kuka-rsi`，s
 - **RKorr 是每拍增量**（KRL 必须 `RSI_ON(#RELATIVE)`；默认 `#ABSOLUTE` 会把增量当绝对偏移）。发 0 = 保持当前叠加，不是归零。
 - PosCorr 的 Lower/UpperLim 限制**总修正**（须 ±80mm 行程），单拍由 `per_cycle_max_mm=0.08` 钳；`PosCorrMon.MaxTrans=80` 监总半径；`cumulative_max_mm` 必须 ≤ 机器人侧限值。
 - **RefCorrSys=Tool**：RKorr 增量就是工具系毫米，禁止旋到基座（按基座发会把退刀变加压，正反馈）。
-- 方向约定：进给 = 工具 +X（`press_motion_sign=+1`），压紧时传感器该轴读数为负（`press_sign=-1`）。
+- 方向约定：进给 = 钻轴。**2026-10-09 TCP 重标定后钻轴 = 工具 Z**（`force_control.axis="Z"`，轴向推力实测落 Fz、压紧读负）；压紧时该轴读数为负（`press_sign=-1`）。横向让位/对中通道**自动跟随钻轴推导**（axis=Z 时横向走 X/Y、对中 Mx→A/My→B）。旧 KRL 点位按"TCP=法兰"示教，重标定后**必须重示教**（已重示教完毕）。
+- **工具系手型约定（Web 可配置：`frame_convention` 段 + `/api/frame_convention`，默认右手、拇指X/食指Y/中指Z=钻轴）**：服务端校验排列与手性自洽（右手须 拇指×食指=中指）。监控台据当前约定+当前钻轴自动生成"手扳验证参考表"；**此约定只做方向推演，控制律符号由 chisel_lateral_sign / align_sign 独立参数决定**。**用户示教器/口头标签 = 法兰系**（TCP 重标定前旧轴），映射：用户 X = 钻轴 = 工具 Z 通道，用户 Y ≈ 工具 X，用户 Z ≈ 工具 Y——沟通方向时先对齐标签再谈符号。
+- **本机传感器符号（2026-10-08 手扳标定 + 2026-10-09 三方向 40/50/30N 推力复核）**：法兰系下 Y/Z 通道**力与力矩整体反号**（+Y 扳动实测 Fy=−78/Mz=−6.8，+Z 扳动实测 Fz=−287/My=+19.6，等效传感器绕 X 转 180°；X 通道不受影响，故 X 轴力控一直正常，重力矩阵已吸收此旋转）。因此 **`chisel_lateral_sign=-1`、`align_sign=-1`**（已写入配置）。勿改 `sensor_to_flange.rotation_deg` 来"纠正"——现有标定是在当前配置下拟合的，改变换须重标定。另：空载 My 残差实测 +2.4 N·m，**对中死区须高于该残差**（暂设 ≥3 N·m 或先排查残差）再开对中。
 - `contact_threshold_n=20` 高于空载残差（5~12N 漂移）才不误判接触。
 - 收包中断 >1s 判定 RSI 重启，`udp_server.py` 自动 `ForceController.reset()`（机器人叠加归零，PC 累积须同步清零）。
 - 关 RSI 前必须先退刀让 `OV_PRO` 回到 100%，避免 `$OV_PRO` 停在 0；`RobotStatus=TRUE` 是凿击模式，不是"结束钻孔"。
-- 超力保护 `max_force_n=150` 用原始力锁存，过零不立即解锁（须连续卸荷 `trip_clear_s`）。
+- 超力保护 `max_force_n=150` 用滤波通道锁存（EMI 尖峰 1~3 帧可达 ±150N 级，原始值会连续误触发、实测一轮 62/18 次），过零不立即解锁（须连续卸荷 `trip_clear_s`）。调速与停止判断同样用滤波通道（中值+低通，实测均值 30N 时原始值判据 OV 有 98% 时间为 0）。
 - **凿击（`RobotStatus=TRUE`）横向让位**：Y/Z 对持续横向力做零力让位（慢通道滤波 + 死区 + 比例漂移）。让位方向 = `chisel_lateral_sign` × 读数方向（读数=工件对工具作用力，同号让位即背离障碍物卸载）；**符号位必须实机手推批头实测后才能改**，搞反即横向正反馈（顶墙）。死区 `chisel_lateral_deadband_n=15N` 必须高于空载残差 5~12N，否则空载慢漂。单轴让位上限 `chisel_lateral_max_mm=20mm`（Web 可设），内部仍受 80mm PosCorrMon 总限。横向原始力超 `chisel_lateral_trip_n=100N` 判卡滞：沿 -X 全速退刀并闩锁（复用超力解锁规则）。横向让位期间 X 轴恒力（OV_PRO）冻结、横向撤销后恢复；切回钻孔时横向叠加按每拍限幅缓撤到 0。
+- **调试台固定输出（`/debug.html` → `server.debug_override`）**：会真实移动机械臂，仅限联调。平移限幅 = `per_cycle_max_mm`（±0.08mm/拍）、旋转 ±0.05°/拍、OV_PRO 0–100，Web 层与服务端双重校验。优先于力控；**RSI 收包中断 >1s 或 `data_collection` 上升沿（自动标定）会自动停用**（RKorr=0、OV_PRO=100%、力控器复位）。停止后发 0 只保持叠加不撤销偏移（#RELATIVE 语义）。
+- **轴线零力矩对中（`align_*` 参数，通道跟随钻轴：axis=Z 时 Mx→A、My→B）**：凿击叠加在平移让位之上（`align_chisel_enable`），钻孔单独可开（`align_drill_enable`）。几何依据（实测 13:46 B 轴验证）：绕 TCP 旋转不平移 TCP，与平移让位正交；旋转与 OV_PRO 速度环也正交。**实测（2026-10-09）：A/B 双轴 ±5° 全幅执行 ✓、力矩被压降 ✓；参数迭代结论——死区按作业力矩实测×余量设（当前 3 N·m）、保护 30 N·m、累计 ±5°。旋转每拍限幅不能低于 ~0.005°（A 通道实测 0.005°/拍时机器人侧几乎不执行，Act 仅动 0.08°；0.02°/拍全幅执行），推荐 0.01~0.02°/拍 + 低增益控速**。长臂（TCP 距传感器 0.66m）下 5°/s 端部线速度 57mm/s 会激振，增益已降至 0.05。关闭/退出时旋转叠加按每拍限幅缓撤到 0。
 
 ## 标定流程与模型
 
@@ -104,5 +110,8 @@ Ubuntu 生产部署：`sudo bash deploy/install.sh`（装到 `/opt/kuka-rsi`，s
 
 ## 已知未完成项
 
-- 凿击 KRL 程序（走到位 → 置 `RobotStatus=TRUE` 击打 → 结束置 FALSE）尚未编写；PC 侧凿击横向让位控制律已就绪，等机器人侧程序接入即可联调。`chisel_lateral_sign` 上机前须手推批头实测标定。
+- 凿击（`FT_Chisel.src`，KUKA_SRC/ 目录）待实机联调；横向让位增益当前 0.01（现场调低，默认 0.04）。
+- 对中 A 通道每拍限幅需回调 0.01~0.015° 再测（0.005 时机器人不执行）。
+- 力矩重力矩阵后 RMS 地板 ~3.5 N·m（角度读数精度限制）；作业姿态偏置实测 <0.5。
 - `analysis_check*.py` 为一次性历史诊断脚本，不是回归测试。
+- `record_debug_session.py` 为实机联调录制器（临时工具，200ms 轮询 /api/status）。

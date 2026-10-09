@@ -9,6 +9,15 @@ import udp_server  # 语法/导入检查
 
 cfg = load_config("ft_calibration_config.json")
 fc = cfg.force_control
+# 现场标定会把符号/开关写进配置文件（如实测 lateral/align = -1、对中开）；
+# 测试一律按未标定默认值跑，避免依赖现场状态
+fc.chisel_lateral_sign = 1
+fc.align_sign = 1
+fc.align_chisel_enable = False
+fc.align_drill_enable = False
+fc.align_deadband_nm = 0.5
+fc.align_trip_nm = 8.0
+fc.axis = "X"  # 本仿真按钻轴=X 的典范帧跑（现场 TCP 重标定后 axis=Z，通道自动推导）
 print("配置：轴 TOOL", fc.axis, "目标力", fc.default_target_force_n,
       "N  Kp", fc.kp_mm_per_s_per_n, " Ki", fc.ki_mm_per_s2_per_n,
       " 加压限速", fc.advance_speed_mm_s, "mm/s")
@@ -372,5 +381,148 @@ for _ in range(int(2.0 / fc.cycle_s)):
 assert abs(ctrl.corr_cumulative_mm[1]) < 1e-9, f"钻孔下横向叠加应撤到 0: {ctrl.corr_cumulative_mm}"
 assert abs(rk["RKorr.Y"]) < 1e-9
 print("28. 凿击->钻孔切换：横向叠加按限幅缓撤到 0，OK")
+
+# ---- 轴线零力矩对中（B←My、C←Mz）：凿击叠加在平移让位上、钻孔单独可开，默认关 ----
+
+# 29. 凿击对中：My 超死区 -> B 与 My 同号；X/Y/Z 平移不受影响，C 不动
+ctrl.reset()
+fc.align_chisel_enable = True
+try:
+    steps_b = []
+    for _ in range(int(0.5 / fc.cycle_s)):
+        rk = ctrl.update([-30.0, 0.0, 0.0], ANGLES, target, mode="chisel",
+                         torque_tcp=[0.0, 1.5, 0.0])
+        steps_b.append(rk["RKorr.B"])
+        assert abs(rk["RKorr.X"]) < 1e-9
+        assert abs(rk["RKorr.C"]) < 1e-9, "Mz=0 时 C 不应动"
+    active_b = [s for s in steps_b if s != 0.0]
+    assert active_b and all(s > 0.0 for s in active_b), f"B 应与 +My 同号: {active_b[:5]}"
+    assert max(abs(s) for s in active_b) <= fc.align_per_cycle_max_deg + 1e-9
+    assert ctrl.align_active and ctrl.corr_cumulative_deg[1] > 1e-9
+finally:
+    fc.align_chisel_enable = False
+print("29. 凿击轴线对中：B←My 同号、平移不受影响、单轴无串扰，OK")
+
+# 30. Mz 负力矩 -> C 负方向
+ctrl.reset()
+fc.align_chisel_enable = True
+try:
+    steps_c = []
+    for _ in range(int(0.3 / fc.cycle_s)):
+        rk = ctrl.update([-30.0, 0.0, 0.0], ANGLES, target, mode="chisel",
+                         torque_tcp=[0.0, 0.0, -1.5])
+        steps_c.append(rk["RKorr.C"])
+        assert abs(rk["RKorr.B"]) < 1e-9
+finally:
+    fc.align_chisel_enable = False
+active_c = [s for s in steps_c if s != 0.0]
+assert active_c and all(s < 0.0 for s in active_c), f"C 应与 -Mz 同号: {active_c[:5]}"
+assert ctrl.corr_cumulative_deg[2] < -1e-9
+print("30. C←Mz 负力矩同号生效，OK")
+
+# 31. 力矩低于死区不对中（空载力矩残差不漂）
+ctrl.reset()
+fc.align_chisel_enable = True
+try:
+    for _ in range(int(1.0 / fc.cycle_s)):
+        rk = ctrl.update([-30.0, 0.0, 0.0], ANGLES, target, mode="chisel",
+                         torque_tcp=[0.0, 0.3, 0.3])
+finally:
+    fc.align_chisel_enable = False
+assert abs(rk["RKorr.B"]) < 1e-9 and abs(rk["RKorr.C"]) < 1e-9
+assert not ctrl.align_active
+assert abs(ctrl.corr_cumulative_deg[1]) < 1e-9 and abs(ctrl.corr_cumulative_deg[2]) < 1e-9
+print(f"31. 力矩 0.3 N·m < 死区 {fc.align_deadband_nm}：不对中，OK")
+
+# 32. 对中累计限幅 ±align_max_deg：到限后该轴停止
+ctrl.reset()
+old_agn = fc.align_gain_deg_per_s_per_nm
+fc.align_gain_deg_per_s_per_nm = 5.0  # 饱和到每拍上限 0.02°
+fc.align_chisel_enable = True
+try:
+    for _ in range(int(2.0 / fc.cycle_s)):
+        ctrl.update([-30.0, 0.0, 0.0], ANGLES, target, mode="chisel",
+                    torque_tcp=[0.0, 1.5, 0.0])
+    assert ctrl.corr_cumulative_deg[1] <= fc.align_max_deg + 1e-9, \
+        f"对中累计超上限: {ctrl.corr_cumulative_deg[1]}"
+    assert abs(ctrl.corr_cumulative_deg[1] - fc.align_max_deg) < fc.align_per_cycle_max_deg
+    rk = ctrl.update([-30.0, 0.0, 0.0], ANGLES, target, mode="chisel",
+                     torque_tcp=[0.0, 1.5, 0.0])
+    assert abs(rk["RKorr.B"]) < 1e-9, f"到限后应停止对中: {rk}"
+finally:
+    fc.align_gain_deg_per_s_per_nm = old_agn
+    fc.align_chisel_enable = False
+print(f"32. 对中累计限幅 ±{fc.align_max_deg}° 到限停止，OK")
+
+# 33. 力矩硬阈值：滤波力矩持续超限 -> -X 退刀并闩锁；过零不立即解锁
+ctrl.reset()
+fc.align_chisel_enable = True
+try:
+    retreated = False
+    for _ in range(int(0.2 / fc.cycle_s)):  # 滤波通道需 ~40ms 收敛后触发
+        rk = ctrl.update([-30.0, 0.0, 0.0], ANGLES, target, mode="chisel",
+                         torque_tcp=[0.0, 10.0, 0.0])
+        if ctrl.tripped:
+            assert rk["RKorr.X"] < -0.5 * fc.per_cycle_max_mm, f"应沿 -X 全速退刀: {rk}"
+            assert abs(rk["RKorr.B"]) < 1e-9 and abs(rk["RKorr.C"]) < 1e-9
+            retreated = True
+    assert ctrl.tripped, "My=10 N·m 持续 0.2s 应触发力矩卡滞保护"
+    assert retreated
+    for _ in range(10):
+        ctrl.update([-1.0, 0.0, 0.0], ANGLES, target, mode="chisel",
+                    torque_tcp=[0.0, 0.5, 0.0])
+        assert ctrl.tripped, "力矩保护过零不得立即解锁"
+    for _ in range(int(0.5 / fc.cycle_s)):
+        ctrl.update([-1.0, 0.0, 0.0], ANGLES, target, mode="chisel",
+                    torque_tcp=[0.0, 0.5, 0.0])
+    assert not ctrl.tripped, "持续卸荷 0.2s 后应解除保护"
+finally:
+    fc.align_chisel_enable = False
+print("33. 力矩卡滞保护（滤波判据）：触发退刀、闩锁、卸荷解除，OK")
+
+# 34. 钻孔对中：B 输出、平移恒 0，OV 速度律不受影响
+ctrl.reset()
+fc.align_drill_enable = True
+try:
+    for _ in range(int(0.3 / fc.cycle_s)):
+        rk = ctrl.update([-40.0, 0.0, 0.0], ANGLES, target, mode="drill",
+                         torque_tcp=[0.0, 1.5, 0.0])
+        assert abs(rk["RKorr.X"]) < 1e-9 and abs(rk["RKorr.Y"]) < 1e-9 and abs(rk["RKorr.Z"]) < 1e-9
+        assert rk["RKorr.B"] >= 0.0
+    assert ctrl.corr_cumulative_deg[1] > 1e-9, "钻孔对中应产生 B 叠加"
+    assert ctrl.ov_pro_pct < 100.0, "OV 律应照常运行（40N 降倍率）"
+finally:
+    fc.align_drill_enable = False
+print("34. 钻孔轴线对中：B 输出、平移恒 0、OV 律不受影响，OK")
+
+# 35. 关闭对中后旋转叠加缓撤到 0
+for _ in range(int(0.5 / fc.cycle_s)):
+    rk = ctrl.update([-40.0, 0.0, 0.0], ANGLES, target, mode="drill",
+                     torque_tcp=[0.0, 0.0, 0.0])
+    assert rk["RKorr.B"] <= 0.0
+assert abs(ctrl.corr_cumulative_deg[1]) < 1e-9, f"旋转叠加应撤到 0: {ctrl.corr_cumulative_deg}"
+assert abs(rk["RKorr.B"]) < 1e-9
+print("35. 对中关闭：旋转叠加按限幅缓撤到 0，OK")
+
+# 36. 钻轴=Z 的通道泛化（TCP 重标定后现场形态）：横向走 X/Y、对中 Mx->A
+fc.axis = "Z"
+fc.align_chisel_enable = True
+ctrl_z = ForceController(fc)
+ctrl_z.reset()
+steps_lat, steps_rot = [], []
+for _ in range(int(0.5 / fc.cycle_s)):
+    rk = ctrl_z.update([40.0, 0.0, -30.0], ANGLES, target, mode="chisel",
+                       torque_tcp=[1.5, 0.0, 0.0])
+    steps_lat.append(rk["RKorr.X"])
+    steps_rot.append(rk["RKorr.A"])
+    assert abs(rk["RKorr.Y"]) < 1e-9 and abs(rk["RKorr.B"]) < 1e-9, f"Z 钻轴下 Y/B 不应动: {rk}"
+    assert abs(rk["RKorr.Z"]) < 1e-9, f"钻轴 Z 不做平移让位: {rk}"
+act_lat = [s for s in steps_lat if s != 0.0]
+act_rot = [s for s in steps_rot if s != 0.0]
+assert act_lat and all(s > 0 for s in act_lat), f"+X 横向力应沿 +X 让位: {act_lat[:5]}"
+assert act_rot and all(s > 0 for s in act_rot), f"+Mx 应驱动 A 同号旋转: {act_rot[:5]}"
+fc.axis = "X"
+fc.align_chisel_enable = False
+print("36. 钻轴=Z 泛化：横向 X/Y + 对中 Mx->A，OK")
 
 print("\n全部自检通过")

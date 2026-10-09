@@ -58,6 +58,71 @@ body {
 
 .hidden { display: none; }
 
+/* ---------------- 调试台安全提示条 / 表单 ---------------- */
+
+.notice-strip {
+  background: #33270E;
+  border-left: 3px solid var(--warn);
+  color: #FFD9A0;
+  font-size: 12.5px;
+  line-height: 1.7;
+  padding: 10px 20px;
+  border-bottom: 1px solid var(--line);
+}
+
+.debug-form fieldset {
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  padding: 10px 12px 12px;
+  margin: 0 0 12px;
+}
+
+.debug-form legend {
+  font-size: 12px;
+  color: var(--ink-2);
+  padding: 0 6px;
+}
+
+.debug-form legend span { color: var(--ink-3); }
+
+.dbg-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 10px 14px;
+}
+
+.dbg-grid.dbg-ov { grid-template-columns: 220px; }
+
+.dbg-grid label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--ink-2);
+}
+
+.dbg-grid input {
+  width: 100%;
+  background: var(--bg);
+  color: var(--ink);
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  padding: 5px 8px;
+  font-size: 14px;
+  font-family: var(--num-font);
+  font-variant-numeric: tabular-nums;
+}
+
+.dbg-grid input:focus { border-color: var(--kuka); outline: none; }
+
+.hint { color: var(--ink-3); font-size: 11px; font-family: var(--num-font); }
+
+.pose-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 10px 14px;
+}
+
 /* ---------------- 机床条（吸顶） ---------------- */
 
 .machine-bar {
@@ -128,7 +193,47 @@ body {
 .lamp.on-trip i { background: var(--trip); box-shadow: 0 0 6px rgba(255, 82, 82, 0.8); }
 .lamp.on-trip em { color: var(--trip); }
 
-.cycle { margin-left: auto; display: flex; align-items: center; gap: 8px; }
+.cycle { display: flex; align-items: center; gap: 8px; }
+
+.bar-tail { margin-left: auto; display: flex; align-items: center; gap: 20px; }
+
+.nav-link {
+  color: var(--ink-2);
+  font-size: 13px;
+  text-decoration: none;
+  border-bottom: 1px solid transparent;
+  padding-bottom: 1px;
+}
+
+.nav-link:hover { color: var(--kuka); border-bottom-color: var(--kuka); }
+
+/* 服务模式在线切换（分段开关，主监控台/调试台共用） */
+.mode-switch {
+  display: inline-flex;
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.mode-switch button {
+  background: transparent;
+  border: none;
+  border-radius: 0;
+  margin: 0;
+  padding: 5px 14px;
+  color: var(--ink-2);
+  font-size: 13px;
+}
+
+.mode-switch button + button { border-left: 1px solid var(--line); }
+
+.mode-switch button:not(.active):hover { background: var(--panel-2); }
+
+.mode-switch button.active {
+  background: var(--kuka);
+  color: #16100A;
+  font-weight: 600;
+}
 
 .cycle-dot {
   width: 8px;
@@ -330,6 +435,22 @@ body {
 
 .param-form input:focus, .param-form select:focus { border-color: var(--kuka); outline: none; }
 
+/* 布尔开关行：标签与复选框横排 */
+.param-form label.check {
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+  min-height: 29px;
+}
+
+.param-form input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--kuka);
+  padding: 0;
+  font-family: var(--ui-font);
+}
+
 .param-actions {
   grid-column: 1 / -1;
   display: flex;
@@ -348,6 +469,25 @@ body {
   color: var(--ink-3);
   line-height: 1.6;
 }
+
+/* 手型约定参考表 */
+.frame-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12.5px;
+  margin-top: 10px;
+}
+
+.frame-table th, .frame-table td {
+  text-align: left;
+  padding: 6px 8px;
+  border-bottom: 1px solid #202832;
+}
+
+.frame-table th { color: var(--ink-3); font-weight: 400; font-size: 12px; }
+.frame-table td:last-child, .frame-table th:last-child { font-family: var(--num-font); }
+
+.frame-form { grid-template-columns: repeat(2, 1fr); }
 
 /* ---------------- 事件流 ---------------- */
 

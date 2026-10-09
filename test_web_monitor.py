@@ -410,15 +410,32 @@ def test_force_config_api() -> None:
             assert on_disk["force_control"]["chisel_lateral_deadband_n"] == 20.0
             assert on_disk["force_control"]["chisel_lateral_max_mm"] == 12.5
 
+            # 对中参数（含布尔开关）同样生效并落盘
+            status, payload = _post_json(
+                port, "/api/force_config",
+                {"align_chisel_enable": True, "align_deadband_nm": 0.8, "align_max_deg": 2.5},
+            )
+            assert status == 200 and payload["ok"] is True
+            assert force_config.align_chisel_enable is True
+            assert force_config.align_deadband_nm == 0.8
+            assert force_config.align_max_deg == 2.5
+            with open(config_path, encoding="utf-8") as f:
+                on_disk = json.load(f)
+            assert on_disk["force_control"]["align_chisel_enable"] is True
+
             # 事件流有更新记录
             status, payload = _get_json(port, "/api/events?limit=20")
             assert any("已更新力控参数" in e["message"] for e in payload["events"])
 
-            # 非法输入全部 400：白名单外 / 超范围 / 符号 0 / 空对象 / 坏 JSON / 空体
+            # 非法输入全部 400：白名单外 / 超范围 / 符号 0 / 布尔传字符串 / 空对象 / 坏 JSON / 空体
             for bad in (
                 {"axis": "Z"},
                 {"chisel_lateral_max_mm": 50.0},
                 {"chisel_lateral_sign": 0},
+                {"align_chisel_enable": "yes"},
+                {"align_sign": 0},
+                {"align_max_deg": 9.0},
+                {"align_deadband_nm": 0.01},
                 {},
             ):
                 status, payload = _post_json(port, "/api/force_config", bad)
@@ -450,6 +467,225 @@ def test_force_config_api() -> None:
     print("force_config API 集成测试 OK")
 
 
+def test_debug_override_api() -> None:
+    """/api/debug_override：白名单读写 + 服务端限幅 + 停止归零 + 非力控模式回包生效。"""
+    import udp_server as udp
+
+    # --- 非力控模式下 generate_response 也必须使用固定输出 ---
+    srv = udp.RSIServer(udp.RSIConfig())
+    srv.debug_override = {"enabled": True, "x": 0.01, "y": 0.0, "z": 0.0,
+                          "a": 0.0, "b": 0.0, "c": 0.0, "ov_pro": 55.0}
+    parsed = srv.parse_rsi_xml(udp.SAMPLE_ROB_XML.encode("utf-8"))
+    assert parsed is not None
+    assert srv._apply_debug_override() is True  # 运行循环每拍先应用，再回包
+    reply = srv.generate_response(parsed)
+    assert 'X="0.0100"' in reply and "<OV_PRO>55.0000</OV_PRO>" in reply, reply
+    assert srv.config.rkorr["RKorr.X"] == 0.01 and srv.config.ov_pro == 55.0
+    srv.disable_debug_override("测试")
+    assert srv.debug_override["enabled"] is False
+    reply2 = srv.generate_response(parsed)
+    assert 'X="0.0000"' in reply2 and "<OV_PRO>100.0000</OV_PRO>" in reply2, reply2
+    print("debug 固定输出回包（非力控模式）OK")
+
+    # --- HTTP API：读写 + 校验 ---
+    with tempfile.TemporaryDirectory() as d:
+        dummy = _make_dummy_server(d)
+        disabled_calls: list[str] = []
+
+        def _disable(reason: str) -> None:
+            disabled_calls.append(reason)
+            dummy.debug_override = {"enabled": False, "x": 0.0, "y": 0.0, "z": 0.0,
+                                    "a": 0.0, "b": 0.0, "c": 0.0, "ov_pro": 100.0}
+
+        dummy.debug_override = None
+        dummy.disable_debug_override = _disable  # type: ignore[attr-defined]
+
+        monitor = web_monitor.start_web_server(dummy, data_dir=d, port=0, host="127.0.0.1")
+        port = monitor.port
+        try:
+            # GET 默认态 + 限幅（dummy 无 force_control -> 回退 0.08/0.05）
+            status, payload = _get_json(port, "/api/debug_override")
+            assert status == 200
+            assert payload["debug"]["enabled"] is False
+            assert payload["debug"]["ov_pro"] == 100.0
+            assert payload["limits"]["trans_max"] == 0.08
+            assert payload["limits"]["rot_max"] == 0.05
+
+            # POST 启用：写入 server.debug_override
+            status, payload = _post_json(
+                port, "/api/debug_override",
+                {"enabled": True, "x": 0.02, "y": -0.01, "a": -0.005, "ov_pro": 80.0},
+            )
+            assert status == 200 and payload["ok"] is True
+            assert dummy.debug_override["enabled"] is True
+            assert dummy.debug_override["x"] == 0.02
+            assert dummy.debug_override["a"] == -0.005
+            assert dummy.debug_override["ov_pro"] == 80.0
+
+            # 超限全部 400：平移超 per_cycle_max_mm / 旋转超 0.05 / OV 超 100 / 非法类型 / 白名单外
+            for bad in (
+                {"enabled": True, "x": 0.5},
+                {"enabled": True, "a": 0.1},
+                {"enabled": True, "ov_pro": 150},
+                {"enabled": "yes"},
+                {"rkorr": 1},
+                {},
+            ):
+                status, payload = _post_json(port, "/api/debug_override", bad)
+                assert status == 400, f"{bad} 应被拒绝: {status}"
+                assert "error" in payload
+            assert dummy.debug_override["x"] == 0.02  # 非法请求不破坏已生效值
+
+            # 停止：调用服务端 disabler 并归零
+            status, payload = _post_json(port, "/api/debug_override", {"enabled": False})
+            assert status == 200
+            assert disabled_calls and "Web 调试台停止" in disabled_calls[-1]
+            assert payload["debug"]["enabled"] is False
+            assert payload["debug"]["ov_pro"] == 100.0
+        finally:
+            monitor.shutdown()
+            monitor._http_thread.join(timeout=2)
+            monitor._capacity_thread.join(timeout=2)
+    print("debug_override API 集成测试 OK")
+
+
+def test_server_mode_api() -> None:
+    """/api/server_mode：运行时切换 monitor/force（免重启）。"""
+    import udp_server as udp
+    from calibration_io import load_calibration_result, load_config
+    from calibration_runner import CalibrationRunner
+
+    # --- 服务端 set_service_mode 直测 ---
+    srv = udp.RSIServer(udp.RSIConfig())
+    cfg = load_config("ft_calibration_config.json")
+    srv.calibration_config = cfg
+    srv.calibration_runner = CalibrationRunner(cfg)  # 暂无标定结果
+    assert srv.service_mode() == "monitor"
+    try:
+        srv.set_service_mode("force")
+        raise AssertionError("无标定结果时启用力控应被拒绝")
+    except ValueError as error:
+        assert "标定" in str(error)
+    srv.set_service_mode("monitor")  # 幂等
+    # 有标定结果后切 force：创建力控器并立即生效
+    srv.calibration_runner.calibration_result = load_calibration_result("ft_calibration.json")
+    srv.set_service_mode("force")
+    assert srv.force_mode and srv.force_requested and not srv.force_suspended
+    assert srv.force_controller is not None
+    # 切回 monitor：停固定输出、修正清零、倍率回 100
+    srv.config.rkorr["RKorr.X"] = 0.02
+    srv.debug_override = {"enabled": True, "x": 0.01, "y": 0.0, "z": 0.0,
+                          "a": 0.0, "b": 0.0, "c": 0.0, "ov_pro": 50.0}
+    srv.set_service_mode("monitor")
+    assert not srv.force_mode
+    assert srv.debug_override["enabled"] is False
+    assert srv.config.rkorr["RKorr.X"] == 0.0
+    assert srv.config.ov_pro == 100.0
+    print("set_service_mode 单测 OK")
+
+    # --- HTTP API ---
+    with tempfile.TemporaryDirectory() as d:
+        dummy = _make_dummy_server(d)
+
+        def _set(mode: str) -> None:
+            if mode == "force" and getattr(dummy.calibration_runner, "calibration_result", None) is None:
+                raise ValueError("无标定结果，无法启用力控（请先完成标定）")
+            dummy.force_mode = mode == "force"
+
+        dummy.set_service_mode = _set  # type: ignore[attr-defined]
+        monitor = web_monitor.start_web_server(dummy, data_dir=d, port=0, host="127.0.0.1")
+        port = monitor.port
+        try:
+            status, payload = _get_json(port, "/api/server_mode")
+            assert status == 200 and payload["mode"] == "monitor"
+            assert payload["has_calibration"] is False
+
+            # 无标定 -> force 被拒（409）
+            status, payload = _post_json(port, "/api/server_mode", {"mode": "force"})
+            assert status == 409 and "标定" in payload["error"]
+
+            # 挂上标定结果后切换成功
+            dummy.calibration_runner = SimpleNamespace(calibration_result=object())
+            status, payload = _post_json(port, "/api/server_mode", {"mode": "force"})
+            assert status == 200 and payload["mode"] == "force" and dummy.force_mode
+
+            # 非法请求 400：未知模式 / 多余键
+            status, _ = _post_json(port, "/api/server_mode", {"mode": "debug"})
+            assert status == 400
+            status, _ = _post_json(port, "/api/server_mode", {"mode": "force", "x": 1})
+            assert status == 400
+
+            # 切回监控
+            status, payload = _post_json(port, "/api/server_mode", {"mode": "monitor"})
+            assert status == 200 and payload["mode"] == "monitor" and not dummy.force_mode
+            # 事件流断言在真实 RSIServer 上覆盖（见 test_force_e2e 阶段6 / 单测部分）
+        finally:
+            monitor.shutdown()
+            monitor._http_thread.join(timeout=2)
+            monitor._capacity_thread.join(timeout=2)
+    print("server_mode API 集成测试 OK")
+
+
+def test_frame_convention_api() -> None:
+    """/api/frame_convention：手型约定读写 + 排列/手性自洽校验 + 推导参考表。"""
+    with tempfile.TemporaryDirectory() as d:
+        from calibration_models import FrameConvention
+
+        dummy = _make_dummy_server(d)
+        dummy.calibration_config.frame_convention = FrameConvention()  # type: ignore[attr-defined]
+        config_path = os.path.join(d, "ft_calibration_config.json")
+        monitor = web_monitor.start_web_server(
+            dummy, data_dir=d, port=0, host="127.0.0.1", force_config_path=config_path
+        )
+        port = monitor.port
+        try:
+            # GET：默认约定 + 推导表（右手 拇Y/食Z/中X：推食指(+Z) -> My 读负；推拇指(+Y) -> Mz 读正）
+            status, payload = _get_json(port, "/api/frame_convention")
+            assert status == 200
+            assert payload["convention"] == {"hand": "right", "thumb": "Y", "index": "Z", "middle": "X"}
+            pushes = {p["finger"]: p for p in payload["derived"]["pushes"]}
+            assert pushes["食指"]["expect_moment"] == "My 读负"
+            assert pushes["拇指"]["expect_moment"] == "Mz 读正"
+            assert payload["derived"]["feed_finger"] == "中指"
+
+            # POST：合法的右手标准分配（拇X/食Y/中Z）
+            status, payload = _post_json(
+                port, "/api/frame_convention",
+                {"hand": "right", "thumb": "X", "index": "Y", "middle": "Z"},
+            )
+            assert status == 200 and payload["ok"] is True
+            assert dummy.calibration_config.frame_convention.thumb == "X"
+            with open(config_path, encoding="utf-8") as f:
+                on_disk = json.load(f)
+            assert on_disk["frame_convention"]["middle"] == "Z"
+            # 新分配下推导表更新：X 在拇指 -> 推食指(+Y) -> cross(X,Y)=Z -> Mz 读正
+            pushes = {p["finger"]: p for p in payload["derived"]["pushes"]}
+            assert pushes["食指"]["expect_moment"] == "Mz 读正"
+            assert payload["derived"]["feed_finger"] == "拇指"
+
+            # 非法：轴重复 / 未知手 / 手性不自洽（右手上 X×Z=-Y 的分配）
+            for bad in (
+                {"hand": "right", "thumb": "X", "index": "X", "middle": "Y"},
+                {"hand": "both", "thumb": "X", "index": "Y", "middle": "Z"},
+                {"hand": "right", "thumb": "X", "index": "Z", "middle": "Y"},  # 该分配符合左手
+                {"hand": "left", "thumb": "X", "index": "Y", "middle": "Z"},   # 该分配符合右手
+            ):
+                status, payload = _post_json(port, "/api/frame_convention", bad)
+                assert status == 400, f"{bad} 应被拒绝: {status}"
+                assert "error" in payload
+            # 合法左手分配通过
+            status, payload = _post_json(
+                port, "/api/frame_convention",
+                {"hand": "left", "thumb": "X", "index": "Z", "middle": "Y"},
+            )
+            assert status == 200 and payload["convention"]["hand"] == "left"
+        finally:
+            monitor.shutdown()
+            monitor._http_thread.join(timeout=2)
+            monitor._capacity_thread.join(timeout=2)
+    print("frame_convention API 集成测试 OK")
+
+
 if __name__ == "__main__":
     test_whitelist()
     test_list_files()
@@ -458,4 +694,7 @@ if __name__ == "__main__":
     test_read_series()
     test_web_monitor()
     test_force_config_api()
+    test_debug_override_api()
+    test_server_mode_api()
+    test_frame_convention_api()
     print("\nWeb 监控层测试全部通过")

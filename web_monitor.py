@@ -38,7 +38,7 @@ SSE_INTERVAL_S = 0.1
 SERIES_MAX_POINTS = 10000
 
 # 力控参数在线设定白名单：键 -> (下限, 上限, 类型, 中文名)。
-# 只开放力控闭环参数（凿击横向让位 + 默认目标力）；方向符号只允许 ±1。
+# 凿击横向让位 + 轴线零力矩对中（B←My、C←Mz）+ 默认目标力；方向符号只允许 ±1。
 FORCE_CONFIG_FIELDS: dict[str, tuple[float, float, type, str]] = {
     "default_target_force_n": (0.0, 150.0, float, "默认目标力 (N)"),
     "chisel_lateral_deadband_n": (0.0, 100.0, float, "横向让位启动阈值 (N)"),
@@ -46,7 +46,85 @@ FORCE_CONFIG_FIELDS: dict[str, tuple[float, float, type, str]] = {
     "chisel_lateral_max_mm": (0.5, 20.0, float, "横向让位行程上限 (mm)"),
     "chisel_lateral_trip_n": (20.0, 200.0, float, "横向卡滞保护阈值 (N)"),
     "chisel_lateral_sign": (-1.0, 1.0, int, "横向让位方向符号"),
+    "align_chisel_enable": (False, True, bool, "凿击轴线对中开关"),
+    "align_drill_enable": (False, True, bool, "钻孔轴线对中开关"),
+    "align_deadband_nm": (0.1, 15.0, float, "对中力矩死区 (N·m)"),
+    "align_gain_deg_per_s_per_nm": (0.01, 2.0, float, "对中增益 (°/s/N·m)"),
+    "align_max_deg": (0.5, 5.0, float, "对中累计限幅 (°)"),
+    "align_trip_nm": (2.0, 30.0, float, "对中力矩保护 (N·m)"),
+    "align_sign": (-1.0, 1.0, int, "对中方向符号"),
+    "tcp_filter_enable": (False, True, bool, "TCP 力入口滤波开关"),
+    "tcp_filter_median_window": (1, 15, float, "入口滤波中值窗口(帧)"),
+    "tcp_filter_lpf_hz": (1.0, 100.0, float, "入口滤波低通(Hz)"),
 }
+
+# 调试台固定输出：RKorr 每拍增量平移上限取现场 per_cycle_max_mm（与力控一致），
+# 旋转上限 0.05°/拍；OV_PRO 0–100。会真实移动机械臂，仅供联调方向/链路验证。
+DEBUG_ROT_MAX_DEG = 0.05
+DEBUG_KEYS = ("x", "y", "z", "a", "b", "c")
+
+# 工具系手型约定：三指轴分配必须是 XYZ 的排列；手性须与分配自洽
+# （右手要求 拇指×食指 = 中指；左手为解剖镜像，要求 拇指×食指 = −中指）。
+FRAME_AXES = ("X", "Y", "Z")
+FRAME_FINGERS = (("thumb", "拇指"), ("index", "食指"), ("middle", "中指"))
+
+
+def _cross_letter(a: str, b: str) -> tuple[str, int]:
+    """右手系叉积（轴字母）：返回 (结果轴, 符号)。X×Y=Z，Y×Z=X，Z×X=Y。"""
+    for p, q, r in (("X", "Y", "Z"), ("Y", "Z", "X"), ("Z", "X", "Y")):
+        if (a, b) == (p, q):
+            return r, 1
+        if (a, b) == (q, p):
+            return r, -1
+    raise ValueError("叉积轴相同")
+
+
+def _frame_derived(convention: Any, feed_axis: str = "X") -> dict:
+    """由手型约定 + 钻轴（force_control.axis）推导方向参考表。
+
+    KUKA 帧恒为右手系，叉积/旋转符号与手型无关：
+    - 推尖端沿 +D 产生力矩 = feed × D；
+    - 绕垂直轴 +r 的正旋转把进给端推向 r × feed 方向。
+    """
+    feed_axis = feed_axis.upper()
+    axis_of_finger = {
+        name: getattr(convention, name).upper()
+        for name, _ in FRAME_FINGERS
+    }
+    finger_of_axis = {axis_of_finger[name]: cname for name, cname in FRAME_FINGERS}
+
+    pushes = []
+    for name, cname in FRAME_FINGERS:
+        axis = axis_of_finger[name]
+        if axis == feed_axis:
+            continue  # 进给方向本身：推它只产生轴向力，无弯矩
+        moment_axis, sign = _cross_letter(feed_axis, axis)
+        pushes.append({
+            "finger": cname,
+            "axis": axis,
+            "expect_force": f"F{axis.lower()} 读正",
+            "expect_moment": f"M{moment_axis.lower()} 读{'正' if sign > 0 else '负'}",
+        })
+
+    def _finger_phrase(axis_letter: str, sign: int) -> str:
+        finger = finger_of_axis.get(axis_letter, axis_letter)
+        return f"{'+' if sign > 0 else '−'}{axis_letter}（{finger}{'方向' if sign > 0 else '反方向'}）"
+
+    rotations = {}
+    for r_axis in FRAME_AXES:
+        if r_axis == feed_axis:
+            continue
+        tilt_axis, tilt_sign = _cross_letter(r_axis, feed_axis)
+        rot_letter = {"X": "A", "Y": "B", "Z": "C"}[r_axis]
+        rotations[rot_letter] = (
+            f"{rot_letter}+ 绕 +{r_axis}：进给端向 {_finger_phrase(tilt_axis, tilt_sign)} 偏转"
+        )
+
+    return {
+        "feed_finger": finger_of_axis.get(feed_axis, feed_axis),
+        "pushes": pushes,
+        "rotations": rotations,
+    }
 
 # 常见静态文件 Content-Type
 _CONTENT_TYPES = {
@@ -161,6 +239,8 @@ class WebMonitor:
             self.emit_event(level, message)
 
         server.on_event = on_event
+        # 供运行时新建的力控器补挂同一事件回调（服务模式在线切换时用）
+        self._event_hook = on_event
 
         # 力控/标定子模块可能为 None，挂载时判空
         force_controller = getattr(server, "force_controller", None)
@@ -246,6 +326,7 @@ class WebMonitor:
                 "ov_pro_pct": controller.ov_pro_pct,
                 "status_line": controller.status_line,
                 "chisel_lateral_active": bool(getattr(controller, "chisel_lateral_active", False)),
+                "align_active": bool(getattr(controller, "align_active", False)),
             }
         else:
             force = None
@@ -350,6 +431,9 @@ class WebMonitor:
                 if path == "/":
                     self._send_file(os.path.join(STATIC_DIR, "index.html"))
                     return
+                if path == "/debug.html" or path == "/debug":
+                    self._send_file(os.path.join(STATIC_DIR, "debug.html"))
+                    return
                 if path.startswith("/static/"):
                     full = self._resolve_static(path[len("/static/"):])
                     if full is None or not os.path.isfile(full):
@@ -362,6 +446,15 @@ class WebMonitor:
                     return
                 if path == "/api/force_config":
                     self._handle_force_config_get()
+                    return
+                if path == "/api/debug_override":
+                    self._handle_debug_get()
+                    return
+                if path == "/api/server_mode":
+                    self._handle_server_mode_get()
+                    return
+                if path == "/api/frame_convention":
+                    self._handle_frame_get()
                     return
                 if path == "/api/stream":
                     self._handle_sse()
@@ -384,6 +477,15 @@ class WebMonitor:
                 path = parsed.path
                 if path == "/api/force_config":
                     self._handle_force_config_post()
+                    return
+                if path == "/api/debug_override":
+                    self._handle_debug_post()
+                    return
+                if path == "/api/server_mode":
+                    self._handle_server_mode_post()
+                    return
+                if path == "/api/frame_convention":
+                    self._handle_frame_post()
                     return
                 if path.startswith("/api/files/"):
                     rest = unquote(path[len("/api/files/"):])
@@ -533,19 +635,26 @@ class WebMonitor:
                         HTTPStatus.BAD_REQUEST, f"不在白名单的参数：{', '.join(unknown)}"
                     )
                     return
-                cleaned: dict[str, float | int] = {}
+                cleaned: dict[str, float | int | bool] = {}
                 for key, value in updates.items():
+                    low, high, cast, _ = FORCE_CONFIG_FIELDS[key]
+                    if cast is bool:
+                        # 布尔开关：只接受真布尔（数值 0/1 不收，避免语义歧义）
+                        if not isinstance(value, bool):
+                            self._send_error_json(HTTPStatus.BAD_REQUEST, f"{key} 须为布尔值")
+                            return
+                        cleaned[key] = value
+                        continue
                     if isinstance(value, bool):
                         self._send_error_json(HTTPStatus.BAD_REQUEST, f"{key} 须为数值")
                         return
-                    low, high, cast, _ = FORCE_CONFIG_FIELDS[key]
                     try:
                         typed = cast(value)
                     except (TypeError, ValueError):
                         self._send_error_json(HTTPStatus.BAD_REQUEST, f"{key} 须为数值")
                         return
-                    if key == "chisel_lateral_sign" and typed == 0:
-                        self._send_error_json(HTTPStatus.BAD_REQUEST, "chisel_lateral_sign 只允许 1 或 -1")
+                    if key in ("chisel_lateral_sign", "align_sign") and typed == 0:
+                        self._send_error_json(HTTPStatus.BAD_REQUEST, f"{key} 只允许 1 或 -1")
                         return
                     if not low <= typed <= high:
                         self._send_error_json(
@@ -569,6 +678,254 @@ class WebMonitor:
                     "info", f"[Web] 已更新力控参数：{json.dumps(cleaned, ensure_ascii=False)}"
                 )
                 self._send_json({"ok": True, **self._force_config_payload(fc)})
+
+            def _debug_state(self) -> dict:
+                current = getattr(monitor.server, "debug_override", None)
+                if isinstance(current, dict):
+                    return {
+                        "enabled": bool(current.get("enabled", False)),
+                        **{k: float(current.get(k, 0.0)) for k in DEBUG_KEYS},
+                        "ov_pro": float(current.get("ov_pro", 100.0)),
+                    }
+                return {"enabled": False, **{k: 0.0 for k in DEBUG_KEYS}, "ov_pro": 100.0}
+
+            def _debug_limits(self) -> dict:
+                calib = getattr(monitor.server, "calibration_config", None)
+                fc = getattr(calib, "force_control", None)
+                return {
+                    "trans_max": float(getattr(fc, "per_cycle_max_mm", 0.08) if fc is not None else 0.08),
+                    "rot_max": DEBUG_ROT_MAX_DEG,
+                    "cycle_s": float(getattr(fc, "cycle_s", 0.004) if fc is not None else 0.004),
+                }
+
+            def _handle_debug_get(self) -> None:
+                self._send_json({"debug": self._debug_state(), "limits": self._debug_limits()})
+
+            def _handle_debug_post(self) -> None:
+                # 先读完请求体再应答（同 force_config，防未读数据触发 Windows RST）
+                try:
+                    length = int(self.headers.get("Content-Length") or 0)
+                except ValueError:
+                    length = 0
+                body = b""
+                if length > 0:
+                    if length > 4096:
+                        self._send_error_json(HTTPStatus.BAD_REQUEST, "请求体过大")
+                        return
+                    body = self.rfile.read(length)
+                try:
+                    payload = json.loads(body.decode("utf-8"))
+                except (UnicodeDecodeError, json.JSONDecodeError):
+                    self._send_error_json(HTTPStatus.BAD_REQUEST, "JSON 解析失败")
+                    return
+                if not isinstance(payload, dict) or not payload:
+                    self._send_error_json(HTTPStatus.BAD_REQUEST, "请求体须为非空 JSON 对象")
+                    return
+                allowed = {"enabled", *DEBUG_KEYS, "ov_pro"}
+                unknown = [k for k in payload if k not in allowed]
+                if unknown:
+                    self._send_error_json(
+                        HTTPStatus.BAD_REQUEST, f"不在白名单的参数：{', '.join(unknown)}"
+                    )
+                    return
+                limits = self._debug_limits()
+                state = self._debug_state()
+                for key, value in payload.items():
+                    if key == "enabled":
+                        if not isinstance(value, bool):
+                            self._send_error_json(HTTPStatus.BAD_REQUEST, "enabled 须为布尔值")
+                            return
+                        state["enabled"] = value
+                        continue
+                    if isinstance(value, bool):
+                        self._send_error_json(HTTPStatus.BAD_REQUEST, f"{key} 须为数值")
+                        return
+                    try:
+                        typed = float(value)
+                    except (TypeError, ValueError):
+                        self._send_error_json(HTTPStatus.BAD_REQUEST, f"{key} 须为数值")
+                        return
+                    if key == "ov_pro":
+                        if not 0.0 <= typed <= 100.0:
+                            self._send_error_json(HTTPStatus.BAD_REQUEST, f"ov_pro={value} 超出范围 [0, 100]")
+                            return
+                    else:
+                        bound = limits["trans_max"] if key in "xyz" else limits["rot_max"]
+                        if not -bound <= typed <= bound:
+                            self._send_error_json(
+                                HTTPStatus.BAD_REQUEST,
+                                f"{key}={value} 超出每拍限幅 ±{bound}（RSI 安全约束）",
+                            )
+                            return
+                    state[key] = typed
+                if state["enabled"] is False and "enabled" in payload:
+                    state = {"enabled": False, **{k: 0.0 for k in DEBUG_KEYS}, "ov_pro": 100.0}
+                    disabler = getattr(monitor.server, "disable_debug_override", None)
+                    if callable(disabler):
+                        # 服务端立即清 config.rkorr/OV_PRO 并复位力控器
+                        disabler("Web 调试台停止")
+                    else:
+                        monitor.server.debug_override = dict(state)
+                else:
+                    monitor.server.debug_override = dict(state)
+                    rk = ", ".join(f"{k.upper()}={state[k]:+.4f}" for k in DEBUG_KEYS)
+                    level = "warning" if state["enabled"] else "info"
+                    action = "已启用" if state["enabled"] else "已更新"
+                    monitor.emit_event(
+                        level, f"[Web] 调试固定输出{action}：{rk}，OV_PRO={state['ov_pro']:.0f}%"
+                    )
+                self._send_json({"ok": True, "debug": self._debug_state(), "limits": limits})
+
+            def _handle_server_mode_get(self) -> None:
+                mode = "force" if getattr(monitor.server, "force_mode", False) else "monitor"
+                runner = getattr(monitor.server, "calibration_runner", None)
+                self._send_json({
+                    "mode": mode,
+                    "has_calibration": getattr(runner, "calibration_result", None) is not None,
+                })
+
+            def _handle_server_mode_post(self) -> None:
+                # 先读完请求体再应答（同上，防未读数据触发 Windows RST）
+                try:
+                    length = int(self.headers.get("Content-Length") or 0)
+                except ValueError:
+                    length = 0
+                body = b""
+                if length > 0:
+                    if length > 4096:
+                        self._send_error_json(HTTPStatus.BAD_REQUEST, "请求体过大")
+                        return
+                    body = self.rfile.read(length)
+                try:
+                    payload = json.loads(body.decode("utf-8"))
+                except (UnicodeDecodeError, json.JSONDecodeError):
+                    self._send_error_json(HTTPStatus.BAD_REQUEST, "JSON 解析失败")
+                    return
+                if not isinstance(payload, dict) or set(payload) != {"mode"}:
+                    self._send_error_json(HTTPStatus.BAD_REQUEST, "请求体须为 {\"mode\": \"monitor\"|\"force\"}")
+                    return
+                if payload["mode"] not in ("monitor", "force"):
+                    self._send_error_json(
+                        HTTPStatus.BAD_REQUEST, f"未知模式 {payload['mode']!r}（可选 monitor/force）"
+                    )
+                    return
+                setter = getattr(monitor.server, "set_service_mode", None)
+                if not callable(setter):
+                    self._send_error_json(HTTPStatus.BAD_REQUEST, "服务不支持在线切换模式")
+                    return
+                try:
+                    setter(payload["mode"])
+                except ValueError as error:
+                    status = HTTPStatus.CONFLICT if "标定" in str(error) else HTTPStatus.BAD_REQUEST
+                    self._send_error_json(status, str(error))
+                    return
+                # 运行时新建的力控器补挂事件回调（进入事件流/Web 页可见）
+                controller = getattr(monitor.server, "force_controller", None)
+                hook = getattr(monitor, "_event_hook", None)
+                if controller is not None and hook is not None:
+                    controller.on_event = hook
+                self._send_json({
+                    "ok": True,
+                    "mode": "force" if getattr(monitor.server, "force_mode", False) else "monitor",
+                })
+
+            def _live_convention(self) -> Any:
+                calib_cfg = getattr(monitor.server, "calibration_config", None)
+                return getattr(calib_cfg, "frame_convention", None)
+
+            def _frame_payload(self) -> dict:
+                convention = self._live_convention()
+                calib_cfg = getattr(monitor.server, "calibration_config", None)
+                fc = getattr(calib_cfg, "force_control", None)
+                feed_axis = str(getattr(fc, "axis", "X") if fc is not None else "X")
+                return {
+                    "convention": {
+                        "hand": convention.hand,
+                        "thumb": convention.thumb,
+                        "index": convention.index,
+                        "middle": convention.middle,
+                    },
+                    "feed_axis": feed_axis.upper(),
+                    "derived": _frame_derived(convention, feed_axis),
+                }
+
+            def _handle_frame_get(self) -> None:
+                if self._live_convention() is None:
+                    self._send_error_json(HTTPStatus.CONFLICT, "配置不可用（无 calibration_config）")
+                    return
+                self._send_json(self._frame_payload())
+
+            def _handle_frame_post(self) -> None:
+                calib_cfg = getattr(monitor.server, "calibration_config", None)
+                if calib_cfg is None or self._live_convention() is None:
+                    self._send_error_json(HTTPStatus.CONFLICT, "配置不可用（无 calibration_config）")
+                    return
+                try:
+                    length = int(self.headers.get("Content-Length") or 0)
+                except ValueError:
+                    length = 0
+                body = b""
+                if length > 0:
+                    if length > 4096:
+                        self._send_error_json(HTTPStatus.BAD_REQUEST, "请求体过大")
+                        return
+                    body = self.rfile.read(length)
+                try:
+                    payload = json.loads(body.decode("utf-8"))
+                except (UnicodeDecodeError, json.JSONDecodeError):
+                    self._send_error_json(HTTPStatus.BAD_REQUEST, "JSON 解析失败")
+                    return
+                if not isinstance(payload, dict) or set(payload) != {"hand", "thumb", "index", "middle"}:
+                    self._send_error_json(
+                        HTTPStatus.BAD_REQUEST,
+                        "请求体须为 {hand, thumb, index, middle}",
+                    )
+                    return
+                hand = str(payload["hand"]).lower()
+                if hand not in ("left", "right"):
+                    self._send_error_json(HTTPStatus.BAD_REQUEST, "hand 须为 left 或 right")
+                    return
+                axes = {}
+                for name, cname in FRAME_FINGERS:
+                    axis = str(payload[name]).upper()
+                    if axis not in FRAME_AXES:
+                        self._send_error_json(HTTPStatus.BAD_REQUEST, f"{cname} 须为 X/Y/Z")
+                        return
+                    axes[name] = axis
+                if len(set(axes.values())) != 3:
+                    self._send_error_json(HTTPStatus.BAD_REQUEST, "三根手指的轴分配必须是 X/Y/Z 的排列（不得重复）")
+                    return
+                # 手性自洽：右手要求 拇指×食指 = 中指；左手为镜像（= −中指）
+                cross_axis, cross_sign = _cross_letter(axes["thumb"], axes["index"])
+                fits_right = cross_axis == axes["middle"] and cross_sign > 0
+                fits_left = cross_axis == axes["middle"] and cross_sign < 0
+                if (hand == "right" and not fits_right) or (hand == "left" and not fits_left):
+                    proper_hand = "右手" if fits_right else "左手"
+                    self._send_error_json(
+                        HTTPStatus.BAD_REQUEST,
+                        f"手性不自洽：此分配下 拇指×食指 = {'+' if cross_sign > 0 else '−'}中指，"
+                        f"对应{proper_hand}手势，但 hand 选的是{('右' if hand == 'right' else '左')}手；"
+                        f"请把 hand 改为{proper_hand}或更换手指分配",
+                    )
+                    return
+                from calibration_models import FrameConvention
+                calib_cfg.frame_convention = FrameConvention(
+                    hand=hand, thumb=axes["thumb"], index=axes["index"], middle=axes["middle"]
+                )
+                try:
+                    calibration_io.save_config_section(
+                        monitor.force_config_path, "frame_convention",
+                        {"hand": hand, **axes},
+                    )
+                except (OSError, ValueError) as error:
+                    self._send_error_json(HTTPStatus.INTERNAL_SERVER_ERROR, f"配置落盘失败：{error}")
+                    return
+                monitor.emit_event(
+                    "info",
+                    f"[Web] 工具系手型约定已更新：{('右' if hand == 'right' else '左')}手，"
+                    f"拇指={axes['thumb']} 食指={axes['index']} 中指={axes['middle']}",
+                )
+                self._send_json({"ok": True, **self._frame_payload()})
 
             def _handle_file_action(self, name: str, action: str) -> None:
                 name = self._valid_name_or_400(name)

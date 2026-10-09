@@ -75,6 +75,38 @@ class ForceControlConfig:
     chisel_lateral_sign: int = 1              # 让位方向 = 符号 * 读数方向；读数=工件对工具作用力，同号(+1)让位即卸载
     chisel_lateral_median_window: int = 9     # 横向中值窗口（帧）：压掉单次凿击冲击尖峰
     chisel_lateral_lpf_hz: float = 4.0        # 横向低通截止（Hz）：比 X 更缓，只追持续卡滞力
+    # ---- 轴线零力矩对中（B←My、C←Mz 旋转）：凿击/钻孔分别可开关 ----
+    # 几何依据（实测 rsi_data 13:46 验证）：绕 TCP 旋转不产生 TCP 平移，与 Y/Z 平移让位正交。
+    # 默认关：对中方向符号须实机手扳批头实测后经 Web 开启，搞反会把轴线别向卡滞侧。
+    align_chisel_enable: bool = False      # 凿击模式：叠加在 Y/Z 平移让位之上
+    align_drill_enable: bool = False       # 钻孔模式：治 X 轴与作业面不垂直（孔壁约束平移，只做旋转）
+    align_deadband_nm: float = 0.5         # 对中力矩死区 (N·m)：须高于空载力矩残差
+    align_gain_deg_per_s_per_nm: float = 0.15  # 对中速度增益：(°/s)/N·m，只作用超出死区部分
+    align_per_cycle_max_deg: float = 0.02  # 每拍旋转增量限幅（0.02°/4ms=5°/s）
+    align_max_deg: float = 3.0             # 单轴累计角度限幅（±°）；机器人侧旋转限位很宽（实测 8°+ 仍转），须上位机钳
+    align_trip_nm: float = 8.0             # 力矩硬阈值（原始值锁存 -> 沿 -X 全速退刀，复用超力解锁规则）
+    align_sign: int = 1                    # 对中方向 = 符号 × 力矩方向；实机手扳验证后可改 -1
+    align_median_window: int = 9           # 力矩中值窗口（帧）
+    align_lpf_hz: float = 4.0              # 力矩低通截止（Hz）
+    # ---- 补偿后 TCP 力/力矩入口滤波（显示/控制/CSV 的 tcp_* 列共用）----
+    # 实测 EMI 尖峰 1~3 帧 ±150N 级（测力计实测 ≤50N）：入口一次滤除，下游全部干净
+    tcp_filter_enable: bool = True
+    tcp_filter_median_window: int = 5      # 中值窗口：杀 1~2 帧尖峰
+    tcp_filter_lpf_hz: float = 20.0        # 低通截止：保真实动态（30Hz 弹跳可见），仅去高频噪声
+
+
+@dataclass
+class FrameConvention:
+    """工具系手型约定（人读的物理方向描述，Web 可配置）。
+
+    仅用于方向推演参考表与手扳验证（推哪根手指方向 -> F/M 预期符号）；
+    控制律符号由 chisel_lateral_sign / align_sign 等独立参数决定，不依赖此约定。
+    默认 = 当前项目约定：右手，拇指 Y、食指 Z、中指 X（进给）。
+    """
+    hand: str = "right"     # right / left
+    thumb: str = "Y"
+    index: str = "Z"
+    middle: str = "X"
 
 
 @dataclass
@@ -93,6 +125,7 @@ class CalibrationConfig:
     scale: ScaleCalibration = field(default_factory=ScaleCalibration)
     static_detection: StaticDetectionConfig = field(default_factory=StaticDetectionConfig)
     force_control: ForceControlConfig = field(default_factory=ForceControlConfig)
+    frame_convention: FrameConvention = field(default_factory=FrameConvention)
     files: CalibrationFileConfig = field(default_factory=CalibrationFileConfig)
 
 
@@ -132,4 +165,5 @@ class CalibrationResult:
     rsi_rotation_order: str
     gravity_mps2: float
     gravity_matrix_n: Optional[Matrix3] = None
+    torque_gravity_matrix_nm: Optional[Matrix3] = None  # 自由 3x3 力矩重力矩阵（吸收姿态相关残差）
     notes: list[str] = field(default_factory=list)

@@ -132,17 +132,26 @@ function setDial(id, text) {
 }
 
 function renderStatus(s) {
-  // 模式灯
-  const modeName = MODE_NAMES[s.mode] || s.mode || "—";
-  setLamp("lamp-mode",
-    s.mode === "calibrated_runtime" ? "run" : (s.mode === "calibration_collect" ? "warn" : null),
-    s.force_mode ? modeName + " + 力控" : modeName);
+  // 模式灯：服务模式（力控/监控）优先展示，标定采集时覆盖提示
+  let modeState = null;
+  let modeText;
+  if (s.mode === "calibration_collect") {
+    modeText = "标定采集";
+    modeState = "warn";
+  } else if (s.force_mode) {
+    modeText = "力控";
+    modeState = "run";
+  } else {
+    modeText = "监控";
+  }
+  setLamp("lamp-mode", modeState, modeText);
 
-  // 力控灯：接触/让位/锁存
+  // 力控灯：接触/让位/对中/锁存
   if (s.force) {
     let state = null;
     const parts = [s.force.in_contact ? "接触中" : "未接触"];
     if (s.force.chisel_lateral_active) { parts.push("横向让位中"); state = "kuka"; }
+    if (s.force.align_active) { parts.push("轴线对中中"); if (state !== "trip") state = "kuka"; }
     if (s.force.tripped) { parts.push("超力锁存"); state = "trip"; }
     if (!state && s.force.in_contact) state = "run";
     setLamp("lamp-force", state, parts.join(" · "));
@@ -513,13 +522,22 @@ const FORCE_CONFIG_KEYS = [
   "chisel_lateral_trip_n",
   "chisel_lateral_gain_mm_per_s_per_n",
   "chisel_lateral_sign",
+  "align_chisel_enable",
+  "align_drill_enable",
+  "align_deadband_nm",
+  "align_gain_deg_per_s_per_nm",
+  "align_max_deg",
+  "align_trip_nm",
+  "align_sign",
 ];
 
 function applyForceConfig(fc) {
   for (const key of FORCE_CONFIG_KEYS) {
     if (!(key in fc)) continue;
     const el = document.getElementById("fc-" + key);
-    if (el) el.value = fc[key];
+    if (!el) continue;
+    if (el.type === "checkbox") el.checked = !!fc[key];
+    else el.value = fc[key];
   }
 }
 
@@ -536,8 +554,11 @@ async function saveForceConfig() {
   for (const key of FORCE_CONFIG_KEYS) {
     const el = document.getElementById("fc-" + key);
     if (!el) continue;
-    const raw = key === "chisel_lateral_sign" ? parseInt(el.value, 10) : parseFloat(el.value);
-    if (!Number.isFinite(raw)) {
+    let raw;
+    if (el.type === "checkbox") raw = el.checked;
+    else if (el.tagName === "SELECT") raw = parseInt(el.value, 10);
+    else raw = parseFloat(el.value);
+    if (typeof raw !== "boolean" && !Number.isFinite(raw)) {
       info.textContent = "参数无效：" + key;
       return;
     }
@@ -557,15 +578,73 @@ async function saveForceConfig() {
   }
 }
 
+/* ---------------- 工具系手型约定 ---------------- */
+
+function renderFrameConvention(data) {
+  const c = data.convention || {};
+  document.getElementById("fc-hand").value = c.hand || "right";
+  for (const key of ["thumb", "index", "middle"]) {
+    const el = document.getElementById("fc-" + key);
+    if (el && c[key]) el.value = c[key];
+  }
+  const derived = data.derived || {};
+  const tbody = document.getElementById("frame-tbody");
+  tbody.innerHTML = "";
+  for (const p of derived.pushes || []) {
+    const tr = document.createElement("tr");
+    for (const text of [`沿${p.finger}（+${p.axis}）推尖端`, p.expect_force, p.expect_moment]) {
+      const td = document.createElement("td");
+      td.textContent = text;
+      tr.appendChild(td);
+    }
+    tbody.appendChild(tr);
+  }
+  const rot = derived.rotations || {};
+  document.getElementById("frame-rotations").textContent =
+    [rot.B, rot.C].filter(Boolean).join("；") || "";
+  document.getElementById("frame-feed").textContent =
+    `进给方向 = 工具 +X（${derived.feed_finger || "—"}所指）。此约定用于方向推演与手扳验证，控制律实际符号仍由"让位方向/对中方向"参数决定。`;
+}
+
+async function loadFrameConvention() {
+  try {
+    renderFrameConvention(await fetchJSON("/api/frame_convention"));
+  } catch { /* 静默 */ }
+}
+
+async function saveFrameConvention() {
+  const info = document.getElementById("frame-info");
+  const payload = {
+    hand: document.getElementById("fc-hand").value,
+    thumb: document.getElementById("fc-thumb").value,
+    index: document.getElementById("fc-index").value,
+    middle: document.getElementById("fc-middle").value,
+  };
+  info.textContent = "保存中…";
+  try {
+    const data = await fetchJSON("/api/frame_convention", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    renderFrameConvention(data);
+    info.textContent = "已保存";
+  } catch (err) {
+    info.textContent = "保存失败：" + err.message;
+  }
+}
+
 /* ---------------- 启动 ---------------- */
 
 buildGauges();
 document.getElementById("history-load").onclick = loadHistory;
 document.getElementById("force-config-save").onclick = saveForceConfig;
+document.getElementById("frame-save").onclick = saveFrameConvention;
 pollStatus();
 pollEvents();
 pollFiles();
 loadForceConfig();
+loadFrameConvention();
 setInterval(pollStatus, POLL_MS);
 setInterval(pollEvents, POLL_MS);
 setInterval(pollFiles, POLL_MS);

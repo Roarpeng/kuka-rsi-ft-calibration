@@ -1,5 +1,5 @@
 &ACCESS RVP
-&REL 4
+&REL 7
 &COMMENT Constant-Force Drilling - Tool X thrust, feed along drill axis
 DEF FT_Drilling ( )
   ;FOLD INI;%{PE}
@@ -32,16 +32,12 @@ DEF FT_Drilling ( )
 
   data_collection = FALSE
   RobotStatus = FALSE
-  target_force = 50.0
   PTP {X 1120.0, Y 240.0, Z -1200.0, A -170.0, B 0.0, C 0.0}
   WAIT SEC 0.2
   RSI_Control(TRUE)
-  ; FALSE=钻孔：上位机按接触力改 $OV_PRO。RKorr 保持 0。不要置 TRUE（那是凿击）。
   RobotStatus = FALSE
-  LIN {X 1120.0, Y 240.0, Z -1200.0, A -170.0, B 0.0, C 0.0}
-  LIN {X 1180.0, Y 240.0, Z -1200.0, A -170.0, B 0.0, C 0.0}
-  ; 关 RSI 前先退刀，让接触力下降、倍率回到 100%，避免 $OV_PRO 停在 0。
-  LIN {X 1120.0, Y 240.0, Z -1200.0, A -170.0, B 0.0, C 0.0}
+  LIN {X 1120.0, Y 240.0, Z -1200.0, A -170.0, B 1.5, C 0.0}
+  LIN {X 1280.0, Y 240.0, Z -1200.0, A -170.0, B 0.0, C 0.0}
   WAIT SEC 0.2
   RSI_Control(FALSE)
 

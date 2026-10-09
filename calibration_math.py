@@ -237,6 +237,21 @@ def fit_gravity_model(samples: list[CalibrationSample], gravity_mps2: float, sen
     torque_bias = torque_solution[:3]
     com_in_sensor = torque_solution[3:6]
 
+    # 自由 3x3 力矩重力矩阵：每轴 tau_i = m_i · d + b_i（d 为传感器系重力方向）。
+    # 与力的自由矩阵同理，吸收长臂工具的姿态相关残差（实测 16 姿态下旧 r_com
+    # 模型力矩残差可达 ±17 N·m，会把轴线对中带偏）。
+    gravity_dirs_fit = [
+        gravity_direction_sensor(sample.tcp_angles_deg, sensor_to_tcp_rotation, rsi_rotation_order)
+        for sample in samples
+    ]
+    torque_gravity_matrix: Matrix3 = []
+    for axis in range(3):
+        rows_ls = [[d[0], d[1], d[2], 1.0] for d in gravity_dirs_fit]
+        targets_ls = [sample.sensor_mean[3 + axis] for sample in samples]
+        sol = solve_least_squares(rows_ls, targets_ls)
+        torque_gravity_matrix.append(sol[0:3])
+        torque_bias[axis] = sol[3]  # 用自由模型的一致 bias
+
     # 物理模型质量仅供参考：增益未标定时其精度取决于 force_scales 的准确度
     notes.append(
         "mass_kg 来自严格物理模型，精度取决于 force_scales；"
@@ -255,6 +270,7 @@ def fit_gravity_model(samples: list[CalibrationSample], gravity_mps2: float, sen
             sensor_to_tcp_rotation,
             rsi_rotation_order,
             gravity_matrix_n=gravity_matrix,
+            torque_gravity_matrix_nm=torque_gravity_matrix,
         )
         measured_force = sample.sensor_mean[:3]
         measured_torque = sample.sensor_mean[3:6]
@@ -276,20 +292,25 @@ def fit_gravity_model(samples: list[CalibrationSample], gravity_mps2: float, sen
         rsi_rotation_order=rsi_rotation_order,
         gravity_mps2=gravity_mps2,
         gravity_matrix_n=gravity_matrix,
+        torque_gravity_matrix_nm=torque_gravity_matrix,
         notes=notes,
     )
 
 
-def predict_static_wrench_sensor(tcp_angles_deg: Vector3, gravity_base_n: Vector3, force_bias_n: Vector3, torque_bias_nm: Vector3, com_in_sensor_m: Vector3, sensor_to_tcp_rotation: Matrix3, rsi_rotation_order: str, gravity_matrix_n: Matrix3 | None = None) -> tuple[Vector3, Vector3]:
+def predict_static_wrench_sensor(tcp_angles_deg: Vector3, gravity_base_n: Vector3, force_bias_n: Vector3, torque_bias_nm: Vector3, com_in_sensor_m: Vector3, sensor_to_tcp_rotation: Matrix3, rsi_rotation_order: str, gravity_matrix_n: Matrix3 | None = None, torque_gravity_matrix_nm: Matrix3 | None = None) -> tuple[Vector3, Vector3]:
+    gravity_dir = gravity_direction_sensor(tcp_angles_deg, sensor_to_tcp_rotation, rsi_rotation_order)
     if gravity_matrix_n is not None:
         # 自由 3x3 模型：F_gravity = S · d，d 为单位重力方向在传感器系的投影
-        gravity_dir = gravity_direction_sensor(tcp_angles_deg, sensor_to_tcp_rotation, rsi_rotation_order)
         gravity_sensor = matrix_vector_multiply(gravity_matrix_n, gravity_dir)
     else:
         r_base_tcp = euler_to_matrix(tcp_angles_deg, rsi_rotation_order)
         r_base_sensor = matrix_multiply(r_base_tcp, matrix_transpose(sensor_to_tcp_rotation))
         gravity_sensor = matrix_vector_multiply(matrix_transpose(r_base_sensor), gravity_base_n)
-    torque_gravity = cross(com_in_sensor_m, gravity_sensor)
+    if torque_gravity_matrix_nm is not None:
+        # 自由 3x3 力矩模型：tau_gravity = M_t · d（吸收长臂工具姿态相关残差）
+        torque_gravity = matrix_vector_multiply(torque_gravity_matrix_nm, gravity_dir)
+    else:
+        torque_gravity = cross(com_in_sensor_m, gravity_sensor)
     predicted_force = vector_add(force_bias_n, gravity_sensor)
     predicted_torque = vector_add(torque_bias_nm, torque_gravity)
     return predicted_force, predicted_torque
@@ -305,15 +326,26 @@ def compensate_wrench(raw_wrench_sensor: Vector6, tcp_angles_deg: Vector3, calib
         sensor_to_tcp_rotation=calibration_result.sensor_to_tcp_rotation,
         rsi_rotation_order=calibration_result.rsi_rotation_order,
         gravity_matrix_n=getattr(calibration_result, "gravity_matrix_n", None),
+        torque_gravity_matrix_nm=getattr(calibration_result, "torque_gravity_matrix_nm", None),
     )
     measured_force_sensor = raw_wrench_sensor[:3]
     measured_torque_sensor = raw_wrench_sensor[3:6]
     compensated_force_sensor = vector_sub(measured_force_sensor, predicted_force_sensor)
     compensated_torque_sensor = vector_sub(measured_torque_sensor, predicted_torque_sensor)
     rotation_sensor_to_tcp = calibration_result.sensor_to_tcp_rotation
-    compensated_force_tcp = matrix_vector_multiply(rotation_sensor_to_tcp, compensated_force_sensor)
-    torque_with_shift = vector_add(compensated_torque_sensor, cross(calibration_result.sensor_to_tcp_translation_m, compensated_force_sensor))
-    compensated_torque_tcp = matrix_vector_multiply(rotation_sensor_to_tcp, torque_with_shift)
+    # R_st 是 child->parent（工具->传感器）方向矩阵；把传感器系量换到工具系须用转置 R_stᵀ。
+    # 参考点平移：tau_TCP = tau_S − t × f（t = TCP 在传感器系中的位置；
+    # 实测教训：方向/符号用错时，沿钻轴的力会在力矩通道产生 t×F 级假力矩）。
+    compensated_force_tcp = matrix_vector_multiply(
+        matrix_transpose(rotation_sensor_to_tcp), compensated_force_sensor
+    )
+    torque_with_shift = vector_sub(
+        compensated_torque_sensor,
+        cross(calibration_result.sensor_to_tcp_translation_m, compensated_force_sensor),
+    )
+    compensated_torque_tcp = matrix_vector_multiply(
+        matrix_transpose(rotation_sensor_to_tcp), torque_with_shift
+    )
     return compensated_force_sensor, compensated_torque_sensor, compensated_force_tcp, compensated_torque_tcp
 
 

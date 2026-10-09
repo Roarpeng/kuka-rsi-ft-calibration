@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import collections
 import csv
+import math
 import os
 import random
 import socket
@@ -123,6 +124,32 @@ SAMPLE_ROB_XML = (
 )
 
 
+class _WrenchAxisFilter:
+    """补偿后 TCP 力/力矩的入口滤波：中值杀尖峰 + 一阶低通。
+
+    实测 EMI 尖峰 1~3 帧 ±150N 级（独立测力计实测真实力 ≤50N），在数据入口
+    一次滤除；显示（SSE/仪表）、力控、CSV 的 tcp_* 列共用同一份干净数据。
+    sensor_* 列保持未滤波（干扰源诊断用）。"""
+
+    def __init__(self, median_n: int, lpf_hz: float, cycle_s: float):
+        self.win: "collections.deque[float]" = collections.deque(maxlen=max(1, median_n))
+        if lpf_hz <= 0.0:
+            self.alpha = 1.0
+        else:
+            tau = 1.0 / (2.0 * math.pi * lpf_hz)
+            self.alpha = cycle_s / (tau + cycle_s)
+        self.lpf: Optional[float] = None
+
+    def push(self, value: float) -> float:
+        self.win.append(value)
+        data = sorted(self.win)
+        n = len(data)
+        mid = n // 2
+        med = data[mid] if n % 2 else 0.5 * (data[mid - 1] + data[mid])
+        self.lpf = med if self.lpf is None else self.lpf + self.alpha * (med - self.lpf)
+        return self.lpf
+
+
 class RSIServer:
     """KUKA RSI UDP 服务器"""
 
@@ -163,7 +190,9 @@ class RSIServer:
         "tcp_Fx_N", "tcp_Fy_N", "tcp_Fz_N", "tcp_Mx_Nm", "tcp_My_Nm", "tcp_Mz_Nm",
         "sample_status",
         "target_force_N", "rkorr_x_mm", "rkorr_y_mm", "rkorr_z_mm",
+        "rkorr_a_deg", "rkorr_b_deg", "rkorr_c_deg",
         "corr_cum_x_mm", "corr_cum_y_mm", "corr_cum_z_mm",
+        "corr_cum_a_deg", "corr_cum_b_deg", "corr_cum_c_deg",
         "RobotStatus", "ov_pro_pct",
     ]
 
@@ -187,6 +216,11 @@ class RSIServer:
         self.force_suspended = False   # 标定期间力控挂起：RKorr=0、OV_PRO=100%
         self.force_requested = False   # 服务以 --force 启动（标定完成后自动恢复力控）
         self._last_data_collection = False  # 上一帧 data_collection，用于上升沿检测
+        # 调试台固定输出（Web /api/debug_override 设置，优先于力控）：
+        # enabled/x/y/z/a/b/c（RKorr 每拍增量，mm/°）+ ov_pro（%）。仅此字典为数据源，
+        # RSI 重启 / 自动标定会自动置 enabled=False（见 disable_debug_override）。
+        self.debug_override: Optional[dict] = None
+        self._debug_rx_since_enable = False  # 启用后是否已收到过 RSI 帧（预启用等首段会话，不算中断）
         self.tx_count = 0
         self.rx_count = 0
         self.parse_ok_count = 0
@@ -197,6 +231,20 @@ class RSIServer:
         # Web 监控层可选回调：均为 best-effort，异常不拖垮控制环
         self.on_frame: Optional[Callable[[RSIData], None]] = None
         self.on_event: Optional[Callable[[str, str], None]] = None
+        # 补偿后 TCP 力/力矩入口滤波（6 轴），参数变化时自动重建
+        self._tcp_filters: list[_WrenchAxisFilter] = []
+        self._tcp_filter_key: Optional[tuple] = None
+
+    def _tcp_filters_ensure(self) -> "list[_WrenchAxisFilter]":
+        fc = getattr(self.calibration_config, "force_control", None)
+        median_n = int(getattr(fc, "tcp_filter_median_window", 5) if fc else 5)
+        lpf_hz = float(getattr(fc, "tcp_filter_lpf_hz", 20.0) if fc else 20.0)
+        cycle_s = float(getattr(fc, "cycle_s", 0.004) if fc else 0.004)
+        key = (median_n, round(lpf_hz, 3), round(cycle_s, 5))
+        if key != self._tcp_filter_key:
+            self._tcp_filters = [_WrenchAxisFilter(median_n, lpf_hz, cycle_s) for _ in range(6)]
+            self._tcp_filter_key = key
+        return self._tcp_filters
 
     def _emit_event(self, level: str, message: str):
         """事件回调（level: info/warning/error）；回调异常一律吞掉，不影响控制环。"""
@@ -320,7 +368,7 @@ class RSIServer:
 
         for tag, _, _ in self.RECEIVE_ELEMENTS:
             if tag.startswith("RKorr."):
-                if self.force_mode:
+                if self.force_mode or self._debug_override_active():
                     value = self.config.rkorr.get(tag, 0.0)
                 elif self.config.reply_zeros:
                     value = 0.0
@@ -371,6 +419,8 @@ class RSIServer:
         message = "[标定] 检测到标定程序信号（data_collection=TRUE），自动进入标定模式"
         print(message)
         self._emit_event("info", message)
+        # 标定走固定姿态，调试固定输出必须让位
+        self.disable_debug_override("检测到标定信号")
         if self.force_mode and self.force_controller is not None:
             # 标定期间挂起力控：RKorr 全 0、倍率回 100%，防止旧标定补偿误动
             self.force_controller.reset()
@@ -441,8 +491,13 @@ class RSIServer:
         rsi_data.sample_status = processed.get("sample_status", "streaming")
 
         if calibrated_wrench is not None:
-            rsi_data.tcp_fx, rsi_data.tcp_fy, rsi_data.tcp_fz = calibrated_wrench.force_tcp
-            rsi_data.tcp_mx, rsi_data.tcp_my, rsi_data.tcp_mz = calibrated_wrench.torque_tcp
+            values = list(calibrated_wrench.force_tcp) + list(calibrated_wrench.torque_tcp)
+            fc = getattr(self.calibration_config, "force_control", None)
+            if fc is None or getattr(fc, "tcp_filter_enable", True):
+                filters = self._tcp_filters_ensure()
+                values = [f.push(v) for f, v in zip(filters, values)]
+            rsi_data.tcp_fx, rsi_data.tcp_fy, rsi_data.tcp_fz = values[0:3]
+            rsi_data.tcp_mx, rsi_data.tcp_my, rsi_data.tcp_mz = values[3:6]
 
         return rsi_data
 
@@ -464,8 +519,14 @@ class RSIServer:
                 rsi_data.sample_status,
                 rsi_data.target_force,
                 self.config.rkorr["RKorr.X"], self.config.rkorr["RKorr.Y"], self.config.rkorr["RKorr.Z"],
+                self.config.rkorr["RKorr.A"], self.config.rkorr["RKorr.B"], self.config.rkorr["RKorr.C"],
                 *(
                     self.force_controller.corr_cumulative_mm
+                    if self.force_controller is not None
+                    else [0.0, 0.0, 0.0]
+                ),
+                *(
+                    self.force_controller.corr_cumulative_deg
                     if self.force_controller is not None
                     else [0.0, 0.0, 0.0]
                 ),
@@ -483,6 +544,87 @@ class RSIServer:
         self.sock.sendto(response_xml.encode("utf-8"), address)
         self.tx_count += 1
         return response_xml
+
+    def _debug_override_active(self) -> bool:
+        return self.debug_override is not None and bool(self.debug_override.get("enabled"))
+
+    def _apply_debug_override(self) -> bool:
+        """调试台固定输出：直接改写本拍 RKorr/OV_PRO（优先于力控，任何模式生效）。"""
+        if not self._debug_override_active():
+            return False
+        values = self.debug_override
+        for axis in "XYZABC":
+            self.config.rkorr[f"RKorr.{axis}"] = float(values[axis.lower()])
+        self.config.ov_pro = float(values["ov_pro"])
+        return True
+
+    def disable_debug_override(self, reason: str):
+        """停止固定输出：数值清零、倍率回 100%、力控器复位（跳帧期间其滤波/累积已过期）。
+
+        #RELATIVE 语义：停止后发 0 只是保持叠加，已产生的偏移不会自动撤销。"""
+        if not self._debug_override_active():
+            return
+        fresh = dict(self.debug_override or {})
+        fresh.update({"enabled": False, "x": 0.0, "y": 0.0, "z": 0.0,
+                      "a": 0.0, "b": 0.0, "c": 0.0, "ov_pro": 100.0})
+        self.debug_override = fresh
+        self._debug_rx_since_enable = False
+        for tag in self.config.rkorr:
+            self.config.rkorr[tag] = 0.0
+        self.config.ov_pro = 100.0
+        if self.force_controller is not None:
+            self.force_controller.reset()
+        message = f"[调试] 固定输出已停止（{reason}）：RKorr=0、OV_PRO=100%"
+        print(message)
+        self._emit_event("warning", message)
+
+    SERVICE_MODES = ("monitor", "force")
+
+    def service_mode(self) -> str:
+        """当前服务模式：monitor=监控（重力补偿+记录）；force=力控（OV_PRO 恒力等）。"""
+        return "force" if self.force_mode else "monitor"
+
+    def set_service_mode(self, mode: str):
+        """Web 层运行时切换服务模式（免重启）。
+
+        monitor：力控关闭，重力补偿与记录继续；
+        force：力控开启（需已有标定结果），力控器不存在则按当前配置创建。
+        切换即操作意图变化：清空本拍修正、复位力控器、停用调试固定输出。
+        """
+        if mode not in self.SERVICE_MODES:
+            raise ValueError(f"未知模式 {mode!r}（可选 {'/'.join(self.SERVICE_MODES)}）")
+        if mode == "force":
+            if (
+                self.calibration_runner is None
+                or self.calibration_runner.calibration_result is None
+            ):
+                raise ValueError("无标定结果，无法启用力控（请先完成标定）")
+            if self.calibration_config is not None:
+                self.calibration_config.mode = "calibrated_runtime"
+            self.force_mode = True
+            self.force_requested = True
+            if not self.auto_calibrating:
+                self.force_suspended = False
+                if self.force_controller is None:
+                    self.force_controller = ForceController(
+                        self.calibration_config.force_control,
+                        rsi_rotation_order=self.calibration_config.rsi_rotation_order,
+                    )
+        else:  # monitor
+            self.force_mode = False
+            self.force_requested = False
+            self.force_suspended = False
+        # 模式切换统一清理：停固定输出、复位力控器、修正清零、倍率回 100%
+        self.disable_debug_override("切换服务模式")
+        if self.force_controller is not None:
+            self.force_controller.reset()
+        for tag in self.config.rkorr:
+            self.config.rkorr[tag] = 0.0
+        self.config.ov_pro = 100.0
+        label = "力控" if mode == "force" else "监控（补偿记录）"
+        message = f"[模式] 服务已切换为{label}（Web 在线切换，无需重启）"
+        print(message)
+        self._emit_event("warning" if mode == "force" else "info", message)
 
     def _update_force_reply(self, rsi_data: RSIData):
         """力控模式：根据补偿后的 TCP 力计算 RKorr，写入 config.rkorr 供本周期回包。"""
@@ -506,6 +648,7 @@ class RSIServer:
             target_force_n=target,
             tcp_position_mm=[rsi_data.Act_X, rsi_data.Act_Y, rsi_data.Act_Z],
             mode="chisel" if rsi_data.RobotStatus else "drill",
+            torque_tcp=[rsi_data.tcp_mx, rsi_data.tcp_my, rsi_data.tcp_mz],
         )
         self.config.rkorr.update(rkorr)
         self.config.ov_pro = self.force_controller.ov_pro_pct
@@ -688,15 +831,24 @@ class RSIServer:
                     # 移继续发增量，把机器人推到错误位置。
                     now_rx = time.monotonic()
                     if (
-                        self.force_mode
-                        and self.force_controller is not None
-                        and self.last_rx_monotonic is not None
+                        self.last_rx_monotonic is not None
                         and now_rx - self.last_rx_monotonic > 1.0
                     ):
-                        self.force_controller.reset()
-                        print("[力控] 收包中断 >1s，判定 RSI 重启，修正累积已清零")
-                        self._emit_event("warning", "[力控] 收包中断 >1s，判定 RSI 重启，修正累积已清零")
+                        if self.force_mode and self.force_controller is not None:
+                            self.force_controller.reset()
+                            print("[力控] 收包中断 >1s，判定 RSI 重启，修正累积已清零")
+                            self._emit_event("warning", "[力控] 收包中断 >1s，判定 RSI 重启，修正累积已清零")
+                        # 调试固定输出：随会话运行过才判定失效（机器人叠加已归零，续发会突然起跳）；
+                        # 预启用等待首段 RSI 会话的（启用后还没收到过帧）不打断
+                        if self._debug_override_active() and self._debug_rx_since_enable:
+                            self.disable_debug_override("收包中断 >1s，判定 RSI 重启")
+                        # 入口滤波历史一并清空（会话重建，从新值起滤）
+                        self._tcp_filter_key = None
                     self.last_rx_monotonic = now_rx
+                    if self._debug_override_active():
+                        self._debug_rx_since_enable = True
+                    else:
+                        self._debug_rx_since_enable = False
 
                     if address not in seen_sources:
                         seen_sources.add(address)
@@ -725,6 +877,8 @@ class RSIServer:
                                 for tag in self.config.rkorr:
                                     self.config.rkorr[tag] = 0.0
                                 self.config.ov_pro = 100.0
+                            elif self._apply_debug_override():
+                                pass  # 调试台固定输出优先于力控
                             else:
                                 self._update_force_reply(rsi_data)
                             response_xml = self._reply(rsi_data, address)
@@ -732,6 +886,8 @@ class RSIServer:
                             if self.force_mode:
                                 # 力控挂起中（自动标定进行中或暂无标定结果）：RKorr=0、OV_PRO=100%
                                 self.config.ov_pro = 100.0
+                            # 调试固定输出在任何模式下都改写本拍 RKorr/OV_PRO
+                            self._apply_debug_override()
                             # RSI 4ms 周期：先回传同一 IPOC，再做标定/写盘
                             response_xml = self._reply(rsi_data, address)
                             rsi_data = self.process_frame(rsi_data)
@@ -940,6 +1096,7 @@ def main():
         print(f"限幅：每拍增量 ±{fc.per_cycle_max_mm} mm（PosCorr），累积 ±{fc.cumulative_max_mm} mm（POSCORRMON），超力保护 {fc.max_force_n} N")
         print(f"倍率：RobotStatus=FALSE 钻孔按力映射 $OV_PRO 0–100%（每拍 ≤{fc.ov_pro_slew_pct:.1f}%）")
         print(f"凿击（TRUE）：X 仍 OV_PRO 恒力；Y/Z 横向让位阈值 {fc.chisel_lateral_deadband_n} N、行程 ±{fc.chisel_lateral_max_mm} mm、卡滞保护 {fc.chisel_lateral_trip_n} N、方向符号 {fc.chisel_lateral_sign:+d}（横向调节期间 X 恒力冻结）")
+        print(f"轴线对中（B←My、C←Mz）：凿击{'开' if fc.align_chisel_enable else '关'}、钻孔{'开' if fc.align_drill_enable else '关'}；死区 {fc.align_deadband_nm} N·m、增益 {fc.align_gain_deg_per_s_per_nm} °/s/N·m、累计 ±{fc.align_max_deg}°、力矩保护 {fc.align_trip_nm} N·m、方向符号 {fc.align_sign:+d}（符号未经实机验证前勿开启）")
         print("RSI 回包：钻孔 RKorr=0 + OV_PRO（须 RSI_ON(#RELATIVE)；Ethernet Out7→Map2OV_PRO 量程 0–100）\n")
     else:
         calibration_config.mode = "record_only"

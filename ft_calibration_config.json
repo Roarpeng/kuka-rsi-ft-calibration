@@ -8,8 +8,8 @@
     "rotation_order": "ZYX"
   },
   "flange_to_tcp": {
-    "translation_m": [0.0, 0.15, 0.23],
-    "rotation_deg": [0.0, 0.0, 0.0],
+    "translation_m": [-0.5212, 0.00075, 0.40748],
+    "rotation_deg": [88.48, 10.67, 87.32],
     "rotation_order": "ZYX"
   },
   "scale": {
@@ -30,7 +30,7 @@
     "max_samples": 16
   },
   "force_control": {
-    "axis": "X",
+    "axis": "Z",
     "press_sign": -1,
     "press_motion_sign": 1,
     "default_target_force_n": 50.0,
@@ -58,15 +58,32 @@
     "default_ov_pro": 100.0,
     "ov_pro_slew_pct": 2.0,
     "chisel_lateral_deadband_n": 15.0,
-    "chisel_lateral_gain_mm_per_s_per_n": 0.04,
+    "chisel_lateral_gain_mm_per_s_per_n": 0.01,
     "chisel_lateral_max_mm": 20.0,
     "chisel_lateral_trip_n": 100.0,
-    "chisel_lateral_sign": 1,
+    "chisel_lateral_sign": -1,
     "chisel_lateral_median_window": 9,
-    "chisel_lateral_lpf_hz": 4.0
+    "chisel_lateral_lpf_hz": 4.0,
+    "align_chisel_enable": false,
+    "align_drill_enable": true,
+    "align_deadband_nm": 3.0,
+    "align_gain_deg_per_s_per_nm": 0.05,
+    "align_max_deg": 5.0,
+    "align_trip_nm": 30.0,
+    "align_sign": -1,
+    "tcp_filter_enable": true,
+    "tcp_filter_median_window": 5,
+    "tcp_filter_lpf_hz": 20.0,
+    "align_per_cycle_max_deg": 0.005
   },
   "files": {
     "calibration_path": "ft_calibration.json",
     "sample_path": "ft_calibration_samples.json"
+  },
+  "frame_convention": {
+    "hand": "right",
+    "thumb": "X",
+    "index": "Y",
+    "middle": "Z"
   }
 }

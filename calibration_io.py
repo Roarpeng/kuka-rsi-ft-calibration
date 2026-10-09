@@ -5,7 +5,7 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
-from calibration_models import CalibrationConfig, CalibrationResult, CalibrationSample, CalibrationFileConfig, EulerTransform, ForceControlConfig, ScaleCalibration, StaticDetectionConfig
+from calibration_models import CalibrationConfig, CalibrationResult, CalibrationSample, CalibrationFileConfig, EulerTransform, ForceControlConfig, FrameConvention, ScaleCalibration, StaticDetectionConfig
 
 
 DEFAULT_CONFIG_PATH = Path("ft_calibration_config.json")
@@ -120,6 +120,33 @@ def _parse_force_control(payload: dict[str, Any]) -> ForceControlConfig:
             "chisel_lateral_median_window", defaults.chisel_lateral_median_window
         )),
         chisel_lateral_lpf_hz=float(payload.get("chisel_lateral_lpf_hz", defaults.chisel_lateral_lpf_hz)),
+        align_chisel_enable=bool(payload.get("align_chisel_enable", defaults.align_chisel_enable)),
+        align_drill_enable=bool(payload.get("align_drill_enable", defaults.align_drill_enable)),
+        align_deadband_nm=float(payload.get("align_deadband_nm", defaults.align_deadband_nm)),
+        align_gain_deg_per_s_per_nm=float(payload.get(
+            "align_gain_deg_per_s_per_nm", defaults.align_gain_deg_per_s_per_nm
+        )),
+        align_per_cycle_max_deg=float(payload.get(
+            "align_per_cycle_max_deg", defaults.align_per_cycle_max_deg
+        )),
+        align_max_deg=float(payload.get("align_max_deg", defaults.align_max_deg)),
+        align_trip_nm=float(payload.get("align_trip_nm", defaults.align_trip_nm)),
+        align_sign=int(payload.get("align_sign", defaults.align_sign)),
+        align_median_window=int(payload.get("align_median_window", defaults.align_median_window)),
+        align_lpf_hz=float(payload.get("align_lpf_hz", defaults.align_lpf_hz)),
+        tcp_filter_enable=bool(payload.get("tcp_filter_enable", defaults.tcp_filter_enable)),
+        tcp_filter_median_window=int(payload.get("tcp_filter_median_window", defaults.tcp_filter_median_window)),
+        tcp_filter_lpf_hz=float(payload.get("tcp_filter_lpf_hz", defaults.tcp_filter_lpf_hz)),
+    )
+
+
+def _parse_frame_convention(payload: dict[str, Any]) -> FrameConvention:
+    defaults = FrameConvention()
+    return FrameConvention(
+        hand=str(payload.get("hand", defaults.hand)).lower(),
+        thumb=str(payload.get("thumb", defaults.thumb)).upper(),
+        index=str(payload.get("index", defaults.index)).upper(),
+        middle=str(payload.get("middle", defaults.middle)).upper(),
     )
 
 
@@ -137,28 +164,35 @@ def load_config(path: str | Path = DEFAULT_CONFIG_PATH) -> CalibrationConfig:
         scale=_parse_scale(payload.get("scale", {})),
         static_detection=_parse_static_detection(payload.get("static_detection", {})),
         force_control=_parse_force_control(payload.get("force_control", {})),
+        frame_convention=_parse_frame_convention(payload.get("frame_convention", {})),
         files=_parse_files(payload.get("files", {})),
     )
 
 
-def save_force_control_updates(
-    path: str | Path, updates: dict[str, float | int]
-) -> dict[str, Any]:
-    """把若干 force_control 参数合并落盘（保留其他段落与字段），返回更新后的段。
+def save_config_section(path: str | Path, section: str, updates: dict[str, Any]) -> dict[str, Any]:
+    """把某一 config 段的若干键合并落盘（保留其他段落与字段），返回更新后的段。
 
-    供 Web 层 /api/force_config 持久化在线设定；键白名单与范围由调用方校验。
+    供 Web 层在线设定持久化（force_control / frame_convention 等）；键白名单与
+    范围由调用方校验。数组保持单行（见 _dump_config_compact_arrays）。
     """
     config_path = Path(path)
     payload: dict[str, Any] = {}
     if config_path.exists():
         payload = _read_json(config_path)
-    section = payload.setdefault("force_control", {})
-    if not isinstance(section, dict):
-        raise ValueError("ft_calibration_config.json 的 force_control 段损坏（非对象）")
-    section.update(updates)
+    section_data = payload.setdefault(section, {})
+    if not isinstance(section_data, dict):
+        raise ValueError(f"ft_calibration_config.json 的 {section} 段损坏（非对象）")
+    section_data.update(updates)
     with config_path.open("w", encoding="utf-8") as handle:
         handle.write(_dump_config_compact_arrays(payload))
-    return section
+    return section_data
+
+
+def save_force_control_updates(
+    path: str | Path, updates: dict[str, float | int | bool]
+) -> dict[str, Any]:
+    """force_control 段在线设定落盘（白名单与范围由 Web 层校验）。"""
+    return save_config_section(path, "force_control", updates)
 
 
 def save_calibration_result(path: str | Path, result: CalibrationResult):
@@ -185,6 +219,7 @@ def load_calibration_result(path: str | Path) -> CalibrationResult | None:
         rsi_rotation_order=payload["rsi_rotation_order"],
         gravity_mps2=float(payload["gravity_mps2"]),
         gravity_matrix_n=([list(row) for row in payload["gravity_matrix_n"]] if payload.get("gravity_matrix_n") else None),
+        torque_gravity_matrix_nm=([list(row) for row in payload["torque_gravity_matrix_nm"]] if payload.get("torque_gravity_matrix_nm") else None),
         notes=list(payload.get("notes", [])),
     )
 

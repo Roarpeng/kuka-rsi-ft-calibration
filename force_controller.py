@@ -82,6 +82,9 @@ class ForceController:
         self.config = config
         self.rsi_rotation_order = rsi_rotation_order
         self.axis_index = AXIS_INDEX[config.axis.upper()]
+        # 垂直于钻轴的两轴：横向让位（平移）与对中（力矩->同轴旋转）都跟随钻轴推导。
+        # 例：axis=X -> Y/Z + My/Mz->B/C；axis=Z -> X/Y + Mx/My->A/B。
+        self.perp = [i for i in range(3) if i != self.axis_index]
         self.integral_n_s = 0.0
         self.corr_cumulative_mm = [0.0, 0.0, 0.0]  # 输出坐标系总偏移（不下发，限幅/路径估计用）
         self.force_filter = _ForceAxisFilter(
@@ -100,7 +103,19 @@ class ForceController:
             )
             for _ in range(2)
         ]
-        self.tripped = False       # 超力保护锁存（X 超限或横向卡滞）
+        self.tripped = False       # 超力保护锁存（X 超限、横向卡滞或力矩卡滞）
+        # 轴线零力矩对中（B←My、C←Mz）：力矩慢通道滤波；绕 TCP 旋转与平移让位正交
+        self.align_filters = [
+            _ForceAxisFilter(
+                median_n=max(1, config.align_median_window),
+                protect_n=max(1, config.filter_protect_window),
+                lpf_hz=config.align_lpf_hz,
+                cycle_s=config.cycle_s,
+            )
+            for _ in range(2)
+        ]
+        self.corr_cumulative_deg = [0.0, 0.0, 0.0]  # A/B/C 旋转叠加累计（°，不下发，限幅用）
+        self.align_active = False    # 对中调节中（旋转与 X 倍率正交，不冻结 OV_PRO）
         self.in_contact = False
         self._last_print_state: Optional[bool] = None
         self._last_path_pos_mm: Optional[list[float]] = None
@@ -116,6 +131,7 @@ class ForceController:
         self.chisel_lateral_active = False  # 凿击横向让位进行中（此期间 X 恒力冻结）
         self._last_mode: Optional[str] = None
         self._lateral_limit_warned = False   # 横向让位到行程上限只提示一次
+        self._align_limit_warned = False     # 对中到角度上限只提示一次
         # Web 监控层可选事件回调：best-effort，异常不拖垮控制环
         self.on_event: Optional[Callable[[str, str], None]] = None
 
@@ -130,8 +146,11 @@ class ForceController:
     def reset(self):
         self.integral_n_s = 0.0
         self.corr_cumulative_mm = [0.0, 0.0, 0.0]
+        self.corr_cumulative_deg = [0.0, 0.0, 0.0]
         self.force_filter.reset()
         for filt in self.lateral_filters:
+            filt.reset()
+        for filt in self.align_filters:
             filt.reset()
         self.tripped = False
         self.in_contact = False
@@ -146,16 +165,24 @@ class ForceController:
         self._bounce_hold = 0
         self.ov_pro_pct = self.config.default_ov_pro
         self.chisel_lateral_active = False
+        self.align_active = False
         self._last_mode = None
         self._lateral_limit_warned = False
+        self._align_limit_warned = False
 
-    def _desired_ov_pro(self, press_raw: float, press_slow: float, target_force_n: float) -> float:
-        """力 → $OV_PRO（0–100%）。空载满倍率接近；到目标/超力停 LIN；不能倒车。"""
+    def _desired_ov_pro(self, press_fast: float, press_slow: float, target_force_n: float) -> float:
+        """力 → $OV_PRO（0–100%）。空载满倍率接近；到目标/超力停 LIN；不能倒车。
+
+        调速与停止判断用滤波通道 press_slow（中值+低通）：实测静止钻削存在
+        1~3 帧力尖峰（噪声/粘滑振铃），用原始值判断会把倍率反复打到 0
+        （实测滤波均值 30N 时 OV 有 98% 时间为 0）。超力瞬时支路与 trip 段
+        一致用短中值 press_fast（杀单帧噪声，12ms 响应）。
+        """
         cfg = self.config
         default = cfg.default_ov_pro
-        if self.tripped or abs(press_raw) > cfg.max_force_n:
+        if self.tripped or abs(press_fast) > cfg.max_force_n:
             return 0.0
-        press = press_raw if press_raw > target_force_n else press_slow
+        press = press_slow
         if target_force_n <= 0.0:
             return 0.0
         if press < cfg.contact_threshold_n:
@@ -187,16 +214,20 @@ class ForceController:
         target_force_n: float,
         tcp_position_mm: Optional[list[float]] = None,
         mode: str = "overlay",
+        torque_tcp: Optional[list[float]] = None,
     ) -> dict[str, float]:
         cfg = self.config
         zero = {f"RKorr.{axis}": 0.0 for axis in "XYZABC"}
 
         if mode != self._last_mode:
-            # 模式切换（钻孔<->凿击等）清横向滤波历史，避免旧模式残值串扰
+            # 模式切换（钻孔<->凿击等）清横向/对中滤波历史，避免旧模式残值串扰
             for filt in self.lateral_filters:
+                filt.reset()
+            for filt in self.align_filters:
                 filt.reset()
             self._last_mode = mode
             self._lateral_limit_warned = False
+            self._align_limit_warned = False
 
         f_axis_raw, f_axis_fast, f_axis_slow = self.force_filter.push(force_tcp[self.axis_index])
         press_raw = cfg.press_sign * f_axis_raw
@@ -221,27 +252,51 @@ class ForceController:
         lat_ready = [False, False]
         if mode == "chisel":
             for i in range(2):
-                lat_raw[i], _, lat_slow[i] = self.lateral_filters[i].push(force_tcp[i + 1])
+                lat_raw[i], _, lat_slow[i] = self.lateral_filters[i].push(force_tcp[self.perp[i]])
                 lat_ready[i] = len(self.lateral_filters[i].median_win) >= max(
                     1, cfg.chisel_lateral_median_window
                 )
 
+        # 轴线对中（凿击/钻孔分别可开关）：推 My/Mz 力矩慢通道
+        align_on = (mode == "chisel" and cfg.align_chisel_enable) or (
+            mode == "drill" and cfg.align_drill_enable
+        )
+        torque = torque_tcp if torque_tcp is not None else [0.0, 0.0, 0.0]
+        align_raw = [0.0, 0.0]
+        align_slow = [0.0, 0.0]
+        if align_on:
+            for i in range(2):
+                _, _, align_slow[i] = self.align_filters[i].push(torque[self.perp[i]])
+
         # ---- 超力保护：用原始值立即锁存。弹跳过零不得解锁，须连续卸荷 trip_clear_s ----
         trip_clear_n = max(1, int(round(cfg.trip_clear_s / cfg.cycle_s)))
-        over_force = abs(f_axis_raw) > cfg.max_force_n
+        # X 轴超力保护锁存用滤波通道 press_slow：实测 EMI 尖峰可达 190N（1~3 帧），
+        # 原始值/中值3 都会被误锁存（OV 被反复打到 0）。真实持续超力 ~60ms 内
+        # 触发；瞬时支路（_desired_ov_pro）仍用中值3 快速降倍率。
+        over_force = abs(press_slow) > cfg.max_force_n
         over_lateral = mode == "chisel" and (
             abs(lat_raw[0]) > cfg.chisel_lateral_trip_n
             or abs(lat_raw[1]) > cfg.chisel_lateral_trip_n
         )
-        if over_force or over_lateral:
+        # 力矩卡滞用滤波通道判断：实测静止钻削的原始力矩存在 1~3 帧 ±50 N·m 级尖峰
+        # （噪声/粘滑振铃），用原始值会连续误触发保护把倍率打到 0（实测一轮 62 次）。
+        over_align = align_on and (
+            abs(align_slow[0]) > cfg.align_trip_nm or abs(align_slow[1]) > cfg.align_trip_nm
+        )
+        if over_force or over_lateral or over_align:
             if not self.tripped:
-                if over_lateral and not over_force:
+                if over_align and not over_force and not over_lateral:
+                    message = (
+                        f"[力控] 力矩卡滞保护！My/Mz 滤波力矩 {align_slow[0]:.2f}/{align_slow[1]:.2f} N·m"
+                        f" 超过 {cfg.align_trip_nm:.1f} N·m，沿 -X 全速退刀"
+                    )
+                elif over_lateral and not over_force:
                     message = (
                         f"[力控] 横向卡滞保护！FY/FZ 原始力 {lat_raw[0]:.1f}/{lat_raw[1]:.1f} N"
                         f" 超过 {cfg.chisel_lateral_trip_n:.1f} N，沿 -X 全速退刀"
                     )
                 else:
-                    message = f"[力控] 超力保护！{cfg.axis} 轴力 {f_axis_raw:.1f} N 超过 {cfg.max_force_n:.1f} N，全速退刀"
+                    message = f"[力控] 超力保护！{cfg.axis} 轴滤波力 {press_slow:.1f} N 超过 {cfg.max_force_n:.1f} N，全速退刀"
                 print(message)
                 self._emit_event("error", message)
             self.tripped = True
@@ -251,10 +306,15 @@ class ForceController:
                 abs(lat_raw[0]) < cfg.chisel_lateral_trip_n * 0.5
                 and abs(lat_raw[1]) < cfg.chisel_lateral_trip_n * 0.5
             )
+            align_clear = not align_on or (
+                abs(align_slow[0]) < cfg.align_trip_nm * 0.5
+                and abs(align_slow[1]) < cfg.align_trip_nm * 0.5
+            )
             if (
                 lateral_clear
+                and align_clear
                 and press_raw < cfg.contact_threshold_n
-                and abs(f_axis_raw) < cfg.max_force_n * 0.5
+                and abs(press_slow) < cfg.max_force_n * 0.5
             ):
                 self._trip_ok_count += 1
                 if self._trip_ok_count >= trip_clear_n:
@@ -265,24 +325,30 @@ class ForceController:
             else:
                 self._trip_ok_count = 0
 
-        # ---- 钻孔：用 $OV_PRO 控编程进给，RKorr 保持 0（凿击残留的横向叠加按限幅缓撤到 0）----
+        # ---- 钻孔：用 $OV_PRO 控编程进给，RKorr 平移保持 0（凿击残留横向叠加缓撤到 0）；
+        # 轴线对中开启时输出 B/C 旋转（治 X 轴与作业面不垂直），与 OV_PRO 速度环正交 ----
         if mode == "drill":
-            self._slew_ov(self._desired_ov_pro(press_raw, press_slow, target_force_n))
+            self._slew_ov(self._desired_ov_pro(press_fast, press_slow, target_force_n))
             self._last_press_slow = press_slow
             self._last_press_raw = press_raw
             self.integral_n_s = 0.0
             self.chisel_lateral_active = False
-            corr_unwind = [0.0, 0.0, 0.0]
+            corr = [0.0, 0.0, 0.0]
             for i in range(2):
-                axis = i + 1
+                axis = self.perp[i]
                 if abs(self.corr_cumulative_mm[axis]) > 1e-9:
-                    corr_unwind[axis] = _clamp(
+                    corr[axis] = _clamp(
                         -self.corr_cumulative_mm[axis],
                         -cfg.per_cycle_max_mm,
                         cfg.per_cycle_max_mm,
                     )
-            if any(abs(step) > 1e-12 for step in corr_unwind):
-                return self._apply_correction(corr_unwind, tcp_angles_deg)
+            if cfg.align_drill_enable and not self.tripped:
+                rot, self.align_active = self._align_correction(align_slow)
+            else:
+                self.align_active = False
+                rot = self._rotation_unwind()
+            if any(abs(v) > 1e-12 for v in corr) or any(abs(v) > 1e-12 for v in rot):
+                return self._apply_correction(corr, tcp_angles_deg, rot)
             return dict(zero)
         if mode == "chisel":
             # 凿击：X 仍按 OV_PRO 恒力压紧；Y/Z 横向零力让位（滑坑/卡滞时顺势卸载，
@@ -298,7 +364,7 @@ class ForceController:
             corr_tool = [0.0, 0.0, 0.0]
             lateral_active = False
             for i in range(2):
-                axis = i + 1
+                axis = self.perp[i]
                 f_slow = lat_slow[i]
                 if not lat_ready[i] or abs(f_slow) <= cfg.chisel_lateral_deadband_n:
                     continue
@@ -333,8 +399,14 @@ class ForceController:
             if lateral_active:
                 pass  # X 恒力冻结：保持当前 OV_PRO 不动，避免与横向调节互相拉扯
             else:
-                self._slew_ov(self._desired_ov_pro(press_raw, press_slow, target_force_n))
-            return self._apply_correction(corr_tool, tcp_angles_deg)
+                self._slew_ov(self._desired_ov_pro(press_fast, press_slow, target_force_n))
+            # 轴线对中叠加（旋转与平移让位正交，不冻结 X 倍率）
+            if cfg.align_chisel_enable:
+                rot, self.align_active = self._align_correction(align_slow)
+            else:
+                self.align_active = False
+                rot = self._rotation_unwind()
+            return self._apply_correction(corr_tool, tcp_angles_deg, rot)
         self.ov_pro_pct = cfg.default_ov_pro
         self.chisel_lateral_active = False
 
@@ -495,11 +567,68 @@ class ForceController:
         r_base_tcp = euler_to_matrix(tcp_angles_deg, self.rsi_rotation_order)
         return matrix_vector_multiply(r_base_tcp, self.corr_cumulative_mm)
 
-    def _apply_correction(self, corr_tool: list[float], tcp_angles_deg: list[float]) -> dict[str, float]:
-        """把本周期工具系速度变成 #RELATIVE 下发的 RKorr 增量。
+    def _align_correction(self, align_slow: list[float]) -> tuple[list[float], bool]:
+        """轴线零力矩对中：B←My、C←Mz（超出死区部分按增益旋转，方向 = align_sign × 力矩方向）。
 
-        RefCorrSys=Tool：增量即工具系毫米（与现场 RSIVisual 一致）。
-        RefCorrSys=Base：旋到基座再作为增量。
+        力矩慢通道只追持续弯矩（轴线被别），单次冲击被中值压掉；
+        累计角度钳在 ±align_max_deg（机器人侧旋转限位很宽，必须上位机钳）。"""
+        cfg = self.config
+        rot = [0.0, 0.0, 0.0]
+        active = False
+        for i in range(2):  # 通道 = 垂直于钻轴的两轴（axis=X 时 My->B/Mz->C；axis=Z 时 Mx->A/My->B）
+            f_slow = align_slow[i]
+            ready = len(self.align_filters[i].median_win) >= max(1, cfg.align_median_window)
+            if not ready or abs(f_slow) <= cfg.align_deadband_nm:
+                continue
+            active = True
+            excess = abs(f_slow) - cfg.align_deadband_nm
+            speed = min(
+                cfg.align_gain_deg_per_s_per_nm * excess,
+                cfg.align_per_cycle_max_deg / cfg.cycle_s,
+            )
+            step = (
+                cfg.align_sign
+                * (1.0 if f_slow > 0.0 else -1.0)
+                * speed
+                * cfg.cycle_s
+            )
+            cur = self.corr_cumulative_deg[self.perp[i]]
+            step = _clamp(step, -cfg.align_max_deg - cur, cfg.align_max_deg - cur)
+            if step == 0.0:
+                if not self._align_limit_warned:
+                    message = (
+                        f"[力控] 轴线对中到角度上限 ±{cfg.align_max_deg:.1f}°，该轴暂停对中"
+                        "（力矩仍在，请检查装夹/姿态）"
+                    )
+                    print(message)
+                    self._emit_event("warning", message)
+                    self._align_limit_warned = True
+                continue
+            rot[self.perp[i]] = step
+        if not active:
+            self._align_limit_warned = False
+        return rot, active
+
+    def _rotation_unwind(self) -> list[float]:
+        """把残留的旋转叠加按每拍限幅缓撤到 0（对中关闭/模式退出时）。"""
+        cfg = self.config
+        rot = [0.0, 0.0, 0.0]
+        for i in range(3):
+            cur = self.corr_cumulative_deg[i]
+            if abs(cur) > 1e-9:
+                rot[i] = _clamp(-cur, -cfg.align_per_cycle_max_deg, cfg.align_per_cycle_max_deg)
+        return rot
+
+    def _apply_correction(
+        self,
+        corr_tool: list[float],
+        tcp_angles_deg: list[float],
+        corr_rot: Optional[list[float]] = None,
+    ) -> dict[str, float]:
+        """把本周期工具系平移/旋转变成 #RELATIVE 下发的 RKorr 增量。
+
+        RefCorrSys=Tool：平移增量即工具系毫米；旋转增量（deg）同样按工具系
+        （绕 TCP 旋转不平移 TCP，与平移让位正交；rkorr_frame=base 时不支持旋转）。
         顶到 cumulative_max 时实际增量会小于请求值（机器人侧叠加不再增加）。
         """
         cfg = self.config
@@ -520,16 +649,28 @@ class ForceController:
         result["RKorr.X"] = delta[0]
         result["RKorr.Y"] = delta[1]
         result["RKorr.Z"] = delta[2]
+
+        if corr_rot is not None:
+            for i in range(3):
+                step = _clamp(corr_rot[i], -cfg.align_per_cycle_max_deg, cfg.align_per_cycle_max_deg)
+                old = self.corr_cumulative_deg[i]
+                total = _clamp(old + step, -cfg.align_max_deg, cfg.align_max_deg)
+                self.corr_cumulative_deg[i] = total
+                result[f"RKorr.{'ABC'[i]}"] = total - old
         return result
 
     @property
     def status_line(self) -> str:
         lateral = " 横向让位中" if self.chisel_lateral_active else ""
+        align = " 轴线对中中" if self.align_active else ""
         return (
-            f"接触={'是' if self.in_contact else '否'}{lateral} "
+            f"接触={'是' if self.in_contact else '否'}{lateral}{align} "
             f"累积修正=({self.corr_cumulative_mm[0]:.2f},"
             f"{self.corr_cumulative_mm[1]:.2f},"
             f"{self.corr_cumulative_mm[2]:.2f}) mm "
+            f"({self.corr_cumulative_deg[0]:+.2f},"
+            f"{self.corr_cumulative_deg[1]:+.2f},"
+            f"{self.corr_cumulative_deg[2]:+.2f})° "
             f"OV={self.ov_pro_pct:.1f}%"
         )
 

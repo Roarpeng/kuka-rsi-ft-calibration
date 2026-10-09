@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>调试台 · KUKA RSI 力控监控</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+  <header class="machine-bar">
+    <div class="brand">
+      <span class="brand-plate" aria-hidden="true"></span>
+      <div class="brand-text">
+        <h1>KUKA RSI</h1>
+        <span>调试台 · RKorr 固定输出</span>
+      </div>
+    </div>
+    <div class="lamps">
+      <span class="lamp" id="lamp-service"><i></i><b>服务</b><em>—</em></span>
+      <span class="lamp" id="lamp-debug"><i></i><b>固定输出</b><em>—</em></span>
+      <span class="lamp" id="lamp-link"><i></i><b>链路</b><em>—</em></span>
+    </div>
+    <div class="bar-tail">
+      <div class="mode-switch" role="group" aria-label="服务模式">
+        <button type="button" data-service-mode="monitor">监控</button>
+        <button type="button" data-service-mode="force">力控</button>
+      </div>
+      <a class="nav-link" href="/">返回主监控台</a>
+      <div class="cycle" title="收到 RSI 帧时点亮">
+        <span class="cycle-dot" id="cycle-dot"></span>
+        <span class="cycle-text">RSI 4 ms</span>
+      </div>
+    </div>
+  </header>
+
+  <div class="notice-strip">
+    固定输出直接下发 RKorr 每拍增量，会真实移动机械臂。启用前确认：现场无人、急停可达、PosCorr 限位与 PosCorrMon 正确。
+    停止后发 0 只表示保持叠加，已产生的偏移不会自动撤销（需要回退就用反向增量，或退出 RSI 由机器人程序接管）。
+    链路中断超过 1s 或机器人触发标定信号时，固定输出会自动停止。
+  </div>
+
+  <main class="bench">
+
+    <div class="bench-grid">
+      <section class="panel">
+        <h2>固定输出设定 <small>RKorr 每拍增量</small></h2>
+        <div class="debug-form">
+          <fieldset>
+            <legend>平移 <span>mm/拍，限 <b id="lim-trans">±0.08</b></span></legend>
+            <div class="dbg-grid">
+              <label>X<input type="number" id="dbg-x" step="0.005"><small class="hint" data-ax="x"></small></label>
+              <label>Y<input type="number" id="dbg-y" step="0.005"><small class="hint" data-ax="y"></small></label>
+              <label>Z<input type="number" id="dbg-z" step="0.005"><small class="hint" data-ax="z"></small></label>
+            </div>
+          </fieldset>
+          <fieldset>
+            <legend>旋转 <span>°/拍，限 <b id="lim-rot">±0.05</b></span></legend>
+            <div class="dbg-grid">
+              <label>A<input type="number" id="dbg-a" step="0.005"><small class="hint" data-ax="a"></small></label>
+              <label>B<input type="number" id="dbg-b" step="0.005"><small class="hint" data-ax="b"></small></label>
+              <label>C<input type="number" id="dbg-c" step="0.005"><small class="hint" data-ax="c"></small></label>
+            </div>
+          </fieldset>
+          <fieldset>
+            <legend>程序倍率 <span>OV_PRO %</span></legend>
+            <div class="dbg-grid dbg-ov">
+              <label>OV_PRO<input type="number" id="dbg-ov" step="5" min="0" max="100" value="100"><small class="hint">0 = 暂停编程进给</small></label>
+            </div>
+          </fieldset>
+          <div class="param-actions">
+            <button type="button" class="btn primary" id="dbg-enable">启用固定输出</button>
+            <button type="button" class="btn hidden" id="dbg-update">更新数值</button>
+            <button type="button" class="btn hidden" id="dbg-zero">全部归零（保持当前位置）</button>
+            <button type="button" class="btn-danger hidden" id="dbg-stop">停止并发送零</button>
+          </div>
+        </div>
+        <p class="footnote">随时可以预填数值，不需要 RSI 已连接：预填 → 机器人起程序 → 点"启用固定输出"即可（预启用后收到第一帧才生效）。
+        增量以工具系（RefCorrSys=Tool）下发：+X 为进给方向。例：X = +0.020 mm/拍 ≈ +5 mm/s 恒速漂移。数值在"更新"或"启用"时一次性下发并保持，逐拍连续发送。</p>
+      </section>
+
+      <aside class="rail">
+        <section class="panel">
+          <h2>当前位姿 <small>Act 基座系</small></h2>
+          <div class="pose-grid">
+            <div class="dial"><h2>X mm</h2><div class="dial-value" id="pose-x">—</div></div>
+            <div class="dial"><h2>Y mm</h2><div class="dial-value" id="pose-y">—</div></div>
+            <div class="dial"><h2>Z mm</h2><div class="dial-value" id="pose-z">—</div></div>
+            <div class="dial"><h2>A °</h2><div class="dial-value" id="pose-a">—</div></div>
+            <div class="dial"><h2>B °</h2><div class="dial-value" id="pose-b">—</div></div>
+            <div class="dial"><h2>C °</h2><div class="dial-value" id="pose-c">—</div></div>
+          </div>
+        </section>
+        <section class="panel">
+          <h2>自启用以来位移 <small>基座系</small></h2>
+          <div class="pose-grid">
+            <div class="dial"><h2>ΔX mm</h2><div class="dial-value compact" id="delta-x">—</div></div>
+            <div class="dial"><h2>ΔY mm</h2><div class="dial-value compact" id="delta-y">—</div></div>
+            <div class="dial"><h2>ΔZ mm</h2><div class="dial-value compact" id="delta-z">—</div></div>
+            <div class="dial"><h2>ΔA °</h2><div class="dial-value compact" id="delta-a">—</div></div>
+            <div class="dial"><h2>ΔB °</h2><div class="dial-value compact" id="delta-b">—</div></div>
+            <div class="dial"><h2>ΔC °</h2><div class="dial-value compact" id="delta-c">—</div></div>
+          </div>
+        </section>
+        <section class="panel">
+          <h2>本拍下发</h2>
+          <div class="pose-grid">
+            <div class="dial"><h2>RKorr X</h2><div class="dial-value compact" id="send-x">—</div></div>
+            <div class="dial"><h2>RKorr Y</h2><div class="dial-value compact" id="send-y">—</div></div>
+            <div class="dial"><h2>RKorr Z</h2><div class="dial-value compact" id="send-z">—</div></div>
+            <div class="dial"><h2>OV_PRO</h2><div class="dial-value compact" id="send-ov">—</div></div>
+          </div>
+        </section>
+      </aside>
+    </div>
+
+    <section class="panel">
+      <h2>机械臂位置 Act_X / Y / Z <small>mm</small></h2>
+      <div class="chart-box tall"><canvas id="chart-pos"></canvas></div>
+    </section>
+    <section class="panel">
+      <h2>姿态 Act_A / B / C <small>°</small></h2>
+      <div class="chart-box mid"><canvas id="chart-att"></canvas></div>
+    </section>
+
+  </main>
+
+  <script src="/static/vendor/chart.umd.min.js"></script>
+  <script src="/static/debug.js"></script>
+  <script src="/static/mode_switch.js"></script>
+</body>
+</html>

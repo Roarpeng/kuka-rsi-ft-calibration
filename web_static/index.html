@@ -25,9 +25,16 @@
       <span class="lamp" id="lamp-chisel"><i></i><b>凿击</b><em>—</em></span>
       <span class="lamp" id="lamp-link"><i></i><b>链路</b><em>—</em></span>
     </div>
-    <div class="cycle" title="收到 RSI 帧时点亮">
-      <span class="cycle-dot" id="cycle-dot"></span>
-      <span class="cycle-text">RSI 4 ms</span>
+    <div class="bar-tail">
+      <div class="mode-switch" role="group" aria-label="服务模式">
+        <button type="button" data-service-mode="monitor">监控</button>
+        <button type="button" data-service-mode="force">力控</button>
+      </div>
+      <a class="nav-link" href="/debug.html">调试台</a>
+      <div class="cycle" title="收到 RSI 帧时点亮">
+        <span class="cycle-dot" id="cycle-dot"></span>
+        <span class="cycle-text">RSI 4 ms</span>
+      </div>
     </div>
   </header>
 
@@ -85,6 +92,37 @@
 
       <aside class="rail">
         <section class="panel">
+          <h2>工具系手型约定 <small>方向推演参考</small></h2>
+          <div class="param-form frame-form">
+            <label>手
+              <select id="fc-hand">
+                <option value="right">右手</option>
+                <option value="left">左手</option>
+              </select>
+            </label>
+            <label>拇指 =
+              <select id="fc-thumb"><option>X</option><option>Y</option><option>Z</option></select>
+            </label>
+            <label>食指 =
+              <select id="fc-index"><option>X</option><option>Y</option><option>Z</option></select>
+            </label>
+            <label>中指 =
+              <select id="fc-middle"><option>X</option><option>Y</option><option>Z</option></select>
+            </label>
+            <div class="param-actions">
+              <button type="button" class="btn" id="frame-save">保存约定</button>
+              <span class="param-info" id="frame-info"></span>
+            </div>
+          </div>
+          <table class="frame-table">
+            <thead><tr><th>手扳验证动作</th><th>预期力</th><th>预期力矩</th></tr></thead>
+            <tbody id="frame-tbody"></tbody>
+          </table>
+          <p class="footnote" id="frame-rotations"></p>
+          <p class="footnote" id="frame-feed"></p>
+        </section>
+
+        <section class="panel">
           <h2>凿击让位参数</h2>
           <form class="param-form" id="force-config-form" autocomplete="off">
             <label>目标力 N<input type="number" id="fc-default_target_force_n" step="1" min="0" max="150"></label>
@@ -96,6 +134,22 @@
               <select id="fc-chisel_lateral_sign">
                 <option value="1">与读数同号（默认）</option>
                 <option value="-1">与读数反号</option>
+              </select>
+            </label>
+            <label class="check">凿击轴线对中
+              <input type="checkbox" id="fc-align_chisel_enable" title="凿击中按 My/Mz 零力矩对中（B/C 旋转，叠加在平移让位之上）">
+            </label>
+            <label class="check">钻孔轴线对中
+              <input type="checkbox" id="fc-align_drill_enable" title="钻孔中按 My/Mz 对中，治 X 轴与作业面不垂直；方向符号未经实机验证前勿开">
+            </label>
+            <label>对中死区 N·m<input type="number" id="fc-align_deadband_nm" step="0.1" min="0.1" max="5"></label>
+            <label>对中增益 °/s/N·m<input type="number" id="fc-align_gain_deg_per_s_per_nm" step="0.01" min="0.01" max="2"></label>
+            <label>对中限幅 °<input type="number" id="fc-align_max_deg" step="0.5" min="0.5" max="5"></label>
+            <label>力矩保护 N·m<input type="number" id="fc-align_trip_nm" step="0.5" min="2" max="30"></label>
+            <label>对中方向
+              <select id="fc-align_sign">
+                <option value="1">与力矩同号（默认）</option>
+                <option value="-1">与力矩反号</option>
               </select>
             </label>
             <div class="param-actions">
@@ -139,5 +193,6 @@
 
   <script src="/static/vendor/chart.umd.min.js"></script>
   <script src="/static/app.js"></script>
+  <script src="/static/mode_switch.js"></script>
 </body>
 </html>
