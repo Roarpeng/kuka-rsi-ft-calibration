@@ -22,13 +22,11 @@
     </div>
     <div class="lamps">
       <span class="lamp" id="lamp-mode"><i></i><b>模式</b><em>—</em></span>
-      <span class="lamp" id="lamp-force"><i></i><b>力控</b><em>—</em></span>
-      <span class="lamp" id="lamp-chisel"><i></i><b>凿击</b><em>—</em></span>
       <span class="lamp" id="lamp-link"><i></i><b>链路</b><em>—</em></span>
     </div>
     <div class="bar-tail">
       <div class="mode-switch" role="group" aria-label="服务模式">
-        <button type="button" data-service-mode="monitor">监控</button>
+        <button type="button" data-service-mode="calibrate">标定</button>
         <button type="button" data-service-mode="force">力控</button>
       </div>
       <a class="nav-link" href="/debug.html">调试台</a>
@@ -92,6 +90,37 @@
       </div>
 
       <aside class="rail">
+        <!-- 当前状态：模式 + 速度 + 位置修正 + 力 -->
+        <section class="panel" id="status-panel">
+          <h2>当前状态</h2>
+          <div class="status-table">
+            <div class="status-row">
+              <span class="status-label">模式</span>
+              <span class="status-value" id="st-mode">—</span>
+            </div>
+            <div class="status-row">
+              <span class="status-label">速度</span>
+              <span class="status-value" id="st-speed">—</span>
+            </div>
+            <div class="status-row">
+              <span class="status-label">压紧力</span>
+              <span class="status-value" id="st-force">—</span>
+            </div>
+            <div class="status-row">
+              <span class="status-label">目标力</span>
+              <span class="status-value" id="st-target">—</span>
+            </div>
+            <div class="status-row">
+              <span class="status-label">位置修正</span>
+              <span class="status-value small" id="st-pos">—</span>
+            </div>
+            <div class="status-row">
+              <span class="status-label">角度修正</span>
+              <span class="status-value small" id="st-rot">—</span>
+            </div>
+          </div>
+        </section>
+
         <section class="panel">
           <h2>工具系手型约定 <small>方向推演参考</small></h2>
           <div class="param-form frame-form">
@@ -124,13 +153,12 @@
         </section>
 
         <section class="panel">
-          <h2>凿击让位参数</h2>
+          <h2>力控参数</h2>
           <div id="force-config-groups"><!-- app.js 按分组动态渲染（每参数带意义提示） --></div>
           <div class="param-actions">
             <button type="button" class="btn primary" id="force-config-save">保存参数</button>
             <span class="param-info" id="force-config-info"></span>
           </div>
-          <p class="footnote">凿击中横向力超过阈值时，机械臂顺势让位卸载（最多让位行程上限）；卡滞超阈值沿 -X 退刀。方向符号须实机手推批头实测后再改。</p>
         </section>
 
         <section class="panel">

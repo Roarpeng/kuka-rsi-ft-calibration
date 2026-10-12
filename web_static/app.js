@@ -142,22 +142,10 @@ function renderStatus(s) {
     modeText = "力控";
     modeState = "run";
   } else {
-    modeText = "监控";
+    modeText = "力控";
+    modeState = "run";
   }
   setLamp("lamp-mode", modeState, modeText);
-
-  // 力控灯：接触/让位/对中/锁存
-  if (s.force) {
-    let state = null;
-    const parts = [s.force.in_contact ? "接触中" : "未接触"];
-    if (s.force.chisel_lateral_active) { parts.push("横向让位中"); state = "kuka"; }
-    if (s.force.align_active) { parts.push("轴线对中中"); if (state !== "trip") state = "kuka"; }
-    if (s.force.tripped) { parts.push("超力锁存"); state = "trip"; }
-    if (!state && s.force.in_contact) state = "run";
-    setLamp("lamp-force", state, parts.join(" · "));
-  } else {
-    setLamp("lamp-force", null, "未启用");
-  }
 
   // 链路灯
   const conn = s.connection || {};
@@ -192,7 +180,44 @@ function renderStatus(s) {
   } else {
     banner.classList.add("hidden");
   }
+
+  // ---- 侧边栏"当前状态"面板 ----
+  const robotMode = { 1: "标定", 2: "钻孔", 3: "凿击" };
+  document.getElementById("st-mode").textContent =
+    robotMode[lastRobotStatus] || (s.mode === "calibration_collect" ? "标定" : "钻孔");
+  document.getElementById("st-speed").textContent =
+    s.ov_pro !== null && s.ov_pro !== undefined ? `${fmt(s.ov_pro, 1)} %` : "—";
+
+  // 压紧力：取钻轴方向（axis=Z 时 Fz）
+  const drillAxis = "z"; // 当前配置 axis=Z
+  const pressKey = `tcp_f${drillAxis}`;
+  if (latestWrench) {
+    const press = -latestWrench[2]; // press = -Fz（press_sign=-1）
+    document.getElementById("st-force").textContent = `${fmt(press, 1)} N`;
+  } else {
+    document.getElementById("st-force").textContent = "—";
+  }
+  document.getElementById("st-target").textContent =
+    s.force ? `${fmt(targetForceN ?? 50, 0)} N` : "—";
+
+  if (s.force && s.force.corr_cumulative_mm) {
+    const [cx, cy, cz] = s.force.corr_cumulative_mm;
+    document.getElementById("st-pos").textContent =
+      `X ${fmt(cx, 2)}  Y ${fmt(cy, 2)}  Z ${fmt(cz, 2)} mm`;
+  } else {
+    document.getElementById("st-pos").textContent = "—";
+  }
+  if (s.force && s.force.corr_cumulative_deg) {
+    const [ca, cb, cc] = s.force.corr_cumulative_deg;
+    document.getElementById("st-rot").textContent =
+      `A ${fmt(ca, 2)}  B ${fmt(cb, 2)}  C ${fmt(cc, 2)} °`;
+  } else {
+    document.getElementById("st-rot").textContent = "—";
+  }
 }
+
+let latestWrench = null;
+let targetForceN = null;
 
 async function pollStatus() {
   try {
@@ -221,12 +246,9 @@ function startStream() {
     try { frame = JSON.parse(ev.data); } catch { return; }
     pulseCycle();
     updateGauges(frame.tcp);
-    if (frame.robot_status !== undefined && frame.robot_status !== null
-        && frame.robot_status !== lastRobotStatus) {
+    if (frame.tcp) latestWrench = frame.tcp;
+    if (frame.robot_status !== undefined && frame.robot_status !== null) {
       lastRobotStatus = frame.robot_status;
-      if (frame.robot_status === 1) setLamp("lamp-chisel", "warn", "标定");
-      else if (frame.robot_status === 3) setLamp("lamp-chisel", "kuka", "凿击");
-      else setLamp("lamp-chisel", null, "钻孔");
     }
     const tSec = frameTimeSec(frame.timestamp);
     chartForce.push(tSec, frame.tcp.slice(0, 3));

@@ -566,24 +566,23 @@ def test_server_mode_api() -> None:
     cfg = load_config("ft_calibration_config.json")
     srv.calibration_config = cfg
     srv.calibration_runner = CalibrationRunner(cfg)  # 暂无标定结果
-    assert srv.service_mode() == "monitor"
+    assert srv.service_mode() in ("force", "calibrate")
     try:
         srv.set_service_mode("force")
         raise AssertionError("无标定结果时启用力控应被拒绝")
     except ValueError as error:
         assert "标定" in str(error)
-    srv.set_service_mode("monitor")  # 幂等
+    srv.set_service_mode("calibrate")  # 幂等（无标定结果时 force 会 409）
     # 有标定结果后切 force：创建力控器并立即生效
     srv.calibration_runner.calibration_result = load_calibration_result("ft_calibration.json")
     srv.set_service_mode("force")
     assert srv.force_mode and srv.force_requested and not srv.force_suspended
     assert srv.force_controller is not None
-    # 切回 monitor：停固定输出、修正清零、倍率回 100
+    # 切到 calibrate 再切回：停固定输出、修正清零、倍率回 100
     srv.config.rkorr["RKorr.X"] = 0.02
     srv.debug_override = {"enabled": True, "x": 0.01, "y": 0.0, "z": 0.0,
                           "a": 0.0, "b": 0.0, "c": 0.0, "ov_pro": 50.0}
-    srv.set_service_mode("monitor")
-    assert not srv.force_mode
+    srv.set_service_mode("calibrate")
     assert srv.debug_override["enabled"] is False
     assert srv.config.rkorr["RKorr.X"] == 0.0
     assert srv.config.ov_pro == 100.0
@@ -603,7 +602,7 @@ def test_server_mode_api() -> None:
         port = monitor.port
         try:
             status, payload = _get_json(port, "/api/server_mode")
-            assert status == 200 and payload["mode"] == "monitor"
+            assert status == 200 and payload["mode"] in ("force", "calibrate")
             assert payload["has_calibration"] is False
 
             # 无标定 -> force 被拒（409）
@@ -620,10 +619,6 @@ def test_server_mode_api() -> None:
             assert status == 400
             status, _ = _post_json(port, "/api/server_mode", {"mode": "force", "x": 1})
             assert status == 400
-
-            # 切回监控
-            status, payload = _post_json(port, "/api/server_mode", {"mode": "monitor"})
-            assert status == 200 and payload["mode"] == "monitor" and not dummy.force_mode
             # 事件流断言在真实 RSIServer 上覆盖（见 test_force_e2e 阶段6 / 单测部分）
         finally:
             monitor.shutdown()

@@ -834,7 +834,7 @@ class WebMonitor:
                 self._send_json({"ok": True, "debug": self._debug_state(), "limits": limits})
 
             def _handle_server_mode_get(self) -> None:
-                mode = "force" if getattr(monitor.server, "force_mode", False) else "monitor"
+                mode = getattr(monitor.server, "service_mode", lambda: "force")()
                 runner = getattr(monitor.server, "calibration_runner", None)
                 self._send_json({
                     "mode": mode,
@@ -859,11 +859,11 @@ class WebMonitor:
                     self._send_error_json(HTTPStatus.BAD_REQUEST, "JSON 解析失败")
                     return
                 if not isinstance(payload, dict) or set(payload) != {"mode"}:
-                    self._send_error_json(HTTPStatus.BAD_REQUEST, "请求体须为 {\"mode\": \"monitor\"|\"force\"}")
+                    self._send_error_json(HTTPStatus.BAD_REQUEST, "请求体须为 {\"mode\": \"calibrate\"|\"force\"}")
                     return
-                if payload["mode"] not in ("monitor", "force"):
+                if payload["mode"] not in ("calibrate", "force"):
                     self._send_error_json(
-                        HTTPStatus.BAD_REQUEST, f"未知模式 {payload['mode']!r}（可选 monitor/force）"
+                        HTTPStatus.BAD_REQUEST, f"未知模式 {payload['mode']!r}（可选 calibrate/force）"
                     )
                     return
                 setter = getattr(monitor.server, "set_service_mode", None)
@@ -883,7 +883,7 @@ class WebMonitor:
                     controller.on_event = hook
                 self._send_json({
                     "ok": True,
-                    "mode": "force" if getattr(monitor.server, "force_mode", False) else "monitor",
+                    "mode": getattr(monitor.server, "service_mode", lambda: "force")(),
                 })
 
             def _live_convention(self) -> Any:

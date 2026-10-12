@@ -615,16 +615,21 @@ class RSIServer:
         print(message)
         self._emit_event("warning", message)
 
-    SERVICE_MODES = ("monitor", "force")
+    SERVICE_MODES = ("calibrate", "force")
 
     def service_mode(self) -> str:
-        """当前服务模式：monitor=监控（重力补偿+记录）；force=力控（OV_PRO 恒力等）。"""
-        return "force" if self.force_mode else "monitor"
+        """当前服务模式：calibrate=标定；force=力控（钻孔/凿击由 RobotStatus 决定）。"""
+        if self.auto_calibrating or (
+            self.calibration_config is not None
+            and self.calibration_config.mode == "calibration_collect"
+        ):
+            return "calibrate"
+        return "force" if self.force_mode else "force"
 
     def set_service_mode(self, mode: str):
         """Web 层运行时切换服务模式（免重启）。
 
-        monitor：力控关闭，重力补偿与记录继续；
+        calibrate：进入标定模式（同 data_collection 触发），16 姿态完成后自动回力控。
         force：力控开启（需已有标定结果），力控器不存在则按当前配置创建。
         切换即操作意图变化：清空本拍修正、复位力控器、停用调试固定输出。
         """
@@ -638,19 +643,29 @@ class RSIServer:
                 raise ValueError("无标定结果，无法启用力控（请先完成标定）")
             if self.calibration_config is not None:
                 self.calibration_config.mode = "calibrated_runtime"
+            # Web 显式切 force：结束标定态（无论自动标定是否走完）
+            self.auto_calibrating = False
             self.force_mode = True
             self.force_requested = True
-            if not self.auto_calibrating:
-                self.force_suspended = False
-                if self.force_controller is None:
-                    self.force_controller = ForceController(
-                        self.calibration_config.force_control,
-                        rsi_rotation_order=self.calibration_config.rsi_rotation_order,
-                    )
-        else:  # monitor
-            self.force_mode = False
-            self.force_requested = False
             self.force_suspended = False
+            if self.force_controller is None and self.calibration_config is not None:
+                self.force_controller = ForceController(
+                    self.calibration_config.force_control,
+                    rsi_rotation_order=self.calibration_config.rsi_rotation_order,
+                )
+        elif mode == "calibrate":
+            # 进入标定模式：与 data_collection 触发同一流程
+            if (
+                self.calibration_runner is not None
+                and self.calibration_config is not None
+            ):
+                self.calibration_runner.samples.clear()
+                self.calibration_runner.last_sample_angles = None
+                self.calibration_config.mode = "calibration_collect"
+                self.auto_calibrating = True
+                if self.force_mode and self.force_controller is not None:
+                    self.force_controller.reset()
+                    self.force_suspended = True
         # 模式切换统一清理：停固定输出、复位力控器、修正清零、倍率回 100%
         self.disable_debug_override("切换服务模式")
         if self.force_controller is not None:
@@ -658,7 +673,7 @@ class RSIServer:
         for tag in self.config.rkorr:
             self.config.rkorr[tag] = 0.0
         self.config.ov_pro = 100.0
-        label = "力控" if mode == "force" else "监控（补偿记录）"
+        label = "力控" if mode == "force" else "标定"
         message = f"[模式] 服务已切换为{label}（Web 在线切换，无需重启）"
         print(message)
         self._emit_event("warning" if mode == "force" else "info", message)

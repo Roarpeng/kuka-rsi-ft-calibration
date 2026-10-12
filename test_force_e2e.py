@@ -128,7 +128,7 @@ assert all(abs(c) < 1e-9 for c in server.force_controller.corr_cumulative_mm)
 print("阶段5 停止固定输出：立即回零、力控恢复接管，OK")
 
 # 阶段6 服务模式在线切换（免重启）：监控 -> 不调倍率；切回力控 -> 恢复调节
-server.set_service_mode("monitor")
+server.set_service_mode("calibrate")
 r6 = send_frames(press_n, 5, 6000, robot_status="FALSE")
 assert 'X="0.0000"' in r6[-1], r6[-1]
 assert abs(ov_of(r6[-1]) - 100.0) < 0.1, f"监控模式下受压也不应调倍率: {ov_of(r6[-1])}"
@@ -136,7 +136,7 @@ server.set_service_mode("force")
 r7 = send_frames(press_n, 5, 7000, robot_status="FALSE")
 assert 'X="0.0000"' in r7[-1]
 assert ov_of(r7[-1]) < 100.0, f"切回力控应恢复调倍率: {ov_of(r7[-1])}"
-print("阶段6 服务模式在线切换：监控停调倍率、切回力控恢复，OK")
+print("阶段6 服务模式在线切换：标定停调倍率、切回力控恢复，OK")
 
 # 阶段7 轴线对中（钻孔）：My 残差超死区 -> B 旋转输出；平移仍 0；关闭后缓撤到 0
 # 力矩 raw 常量与标定强相关（换标定后残差会漂），先运行时测基线与斜率再构造 +2 N·m 残差
