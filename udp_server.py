@@ -338,9 +338,14 @@ class RSIServer:
                         try:
                             setattr(rsi_data, tag, int(value))
                         except ValueError:
-                            if tag == "RobotStatus":
-                                continue  # 旧 BOOL 文本，交给后面的协议兼容映射
-                            raise
+                            try:
+                                # KUKA RSI 全局变量为 REAL 时发送浮点文本（"2.000"/"50.000"），
+                                # 转 float 再取整（现场实测 RobotStatus/FORCEDATA 均为浮点格式）
+                                setattr(rsi_data, tag, int(float(value)))
+                            except (ValueError, TypeError):
+                                if tag == "RobotStatus":
+                                    continue  # 旧 BOOL 文本（TRUE/FALSE），交给后面的协议兼容映射
+                                raise
                     elif elem_type == "DOUBLE":
                         setattr(rsi_data, tag, float(value))
                     elif elem_type == "BOOL":
@@ -349,12 +354,13 @@ class RSIServer:
                     setattr(rsi_data, tag, False)
 
             # RobotStatus 协议升级（2026-10-09）：机器人端改为 INT（1=标定 2=钻孔 3=凿击）。
-            # 兼容旧 BOOL 文本：TRUE->3（凿击）/ FALSE->2（钻孔）；缺省 2。
+            # KUKA 全局变量 REAL 会发送 "2.000" 浮点文本（上面循环已 int(float()) 处理）；
+            # 旧 BOOL 文本：TRUE->3 / FALSE->2；缺省 2。
             rs_elem = root.find(".//RobotStatus")
             if rs_elem is not None and rs_elem.text:
                 rs_text = rs_elem.text.strip().upper()
                 try:
-                    rsi_data.RobotStatus = int(rs_text)
+                    rsi_data.RobotStatus = int(float(rs_text))
                 except ValueError:
                     rsi_data.RobotStatus = 3 if rs_text in ("TRUE", "YES", "ON") else 2
             else:
