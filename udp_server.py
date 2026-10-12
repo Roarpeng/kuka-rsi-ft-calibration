@@ -209,6 +209,7 @@ class RSIServer:
         self.data_dir: str = "data"  # CSV 数据目录（_init_csv 时生效，可运行时改）
         self.csv_file = None
         self.csv_writer = None
+        self._csv_pending = 0
 
         self.calibration_config: Optional[CalibrationConfig] = None
         self.calibration_runner: Optional[CalibrationRunner] = None
@@ -524,42 +525,48 @@ class RSIServer:
 
         return rsi_data
 
+    # CSV 攒批写盘间隔（帧）：50 帧 = 200ms 刷一次盘，消除逐帧 flush 的 I/O 等待
+    CSV_FLUSH_INTERVAL = 50
+
     def save_to_csv(self, rsi_data: RSIData):
-        """保存数据到 CSV"""
-        if self.csv_writer:
-            row = [
-                rsi_data.timestamp,
-                rsi_data.iPOC,
-                1 if rsi_data.data_collection else 0,
-                rsi_data.Fx_raw, rsi_data.Fy_raw, rsi_data.Fz_raw,
-                rsi_data.Mx_raw, rsi_data.My_raw, rsi_data.Mz_raw,
-                rsi_data.Act_X, rsi_data.Act_Y, rsi_data.Act_Z,
-                rsi_data.Act_A, rsi_data.Act_B, rsi_data.Act_C,
-                rsi_data.sensor_fx, rsi_data.sensor_fy, rsi_data.sensor_fz,
-                rsi_data.sensor_mx, rsi_data.sensor_my, rsi_data.sensor_mz,
-                rsi_data.tcp_fx, rsi_data.tcp_fy, rsi_data.tcp_fz,
-                rsi_data.tcp_mx, rsi_data.tcp_my, rsi_data.tcp_mz,
-                rsi_data.sample_status,
-                rsi_data.target_force,
-                rsi_data.FORCEDATA,
-                self.config.rkorr["RKorr.X"], self.config.rkorr["RKorr.Y"], self.config.rkorr["RKorr.Z"],
-                self.config.rkorr["RKorr.A"], self.config.rkorr["RKorr.B"], self.config.rkorr["RKorr.C"],
-                *(
-                    self.force_controller.corr_cumulative_mm
-                    if self.force_controller is not None
-                    else [0.0, 0.0, 0.0]
-                ),
-                *(
-                    self.force_controller.corr_cumulative_deg
-                    if self.force_controller is not None
-                    else [0.0, 0.0, 0.0]
-                ),
-                rsi_data.RobotStatus,
-                self.config.ov_pro,
-            ]
-            self.csv_writer.writerow(row)
-            if self.csv_file is not None:
-                self.csv_file.flush()
+        """保存数据到 CSV（攒批写盘：不逐帧 flush，攒满 CSV_FLUSH_INTERVAL 帧一次性写）"""
+        if not self.csv_writer:
+            return
+        row = [
+            rsi_data.timestamp,
+            rsi_data.iPOC,
+            1 if rsi_data.data_collection else 0,
+            rsi_data.Fx_raw, rsi_data.Fy_raw, rsi_data.Fz_raw,
+            rsi_data.Mx_raw, rsi_data.My_raw, rsi_data.Mz_raw,
+            rsi_data.Act_X, rsi_data.Act_Y, rsi_data.Act_Z,
+            rsi_data.Act_A, rsi_data.Act_B, rsi_data.Act_C,
+            rsi_data.sensor_fx, rsi_data.sensor_fy, rsi_data.sensor_fz,
+            rsi_data.sensor_mx, rsi_data.sensor_my, rsi_data.sensor_mz,
+            rsi_data.tcp_fx, rsi_data.tcp_fy, rsi_data.tcp_fz,
+            rsi_data.tcp_mx, rsi_data.tcp_my, rsi_data.tcp_mz,
+            rsi_data.sample_status,
+            rsi_data.target_force,
+            rsi_data.FORCEDATA,
+            self.config.rkorr["RKorr.X"], self.config.rkorr["RKorr.Y"], self.config.rkorr["RKorr.Z"],
+            self.config.rkorr["RKorr.A"], self.config.rkorr["RKorr.B"], self.config.rkorr["RKorr.C"],
+            *(
+                self.force_controller.corr_cumulative_mm
+                if self.force_controller is not None
+                else [0.0, 0.0, 0.0]
+            ),
+            *(
+                self.force_controller.corr_cumulative_deg
+                if self.force_controller is not None
+                else [0.0, 0.0, 0.0]
+            ),
+            rsi_data.RobotStatus,
+            self.config.ov_pro,
+        ]
+        self.csv_writer.writerow(row)
+        self._csv_pending += 1
+        if self._csv_pending >= self.CSV_FLUSH_INTERVAL and self.csv_file is not None:
+            self.csv_file.flush()
+            self._csv_pending = 0
 
     def _reply(self, rsi_data: RSIData, address: tuple) -> str:
         if self.sock is None or self.config.ONLYSEND:
