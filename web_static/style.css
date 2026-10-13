@@ -123,24 +123,20 @@ body {
   gap: 10px 14px;
 }
 
-/* ---------------- 机床条（吸顶） ---------------- */
+/* ---------------- 机床条（不吸顶，随页面滚动） ---------------- */
 
 .machine-bar {
-  position: sticky;
-  top: 0;
-  z-index: 20;
   display: flex;
   align-items: center;
   gap: 28px;
   flex-wrap: wrap;
   padding: 10px 20px;
-  background: rgba(15, 19, 23, 0.96);
+  background: var(--bg);
   border-bottom: 1px solid var(--line);
-  backdrop-filter: blur(4px);
 }
 
 /* 报警条在场时机床条让位到它下方 */
-.alarm-strip + .machine-bar { top: 37px; }
+/* 报警条已非 sticky，无需偏移 */
 
 .brand { display: flex; align-items: center; gap: 12px; }
 
