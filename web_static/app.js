@@ -198,7 +198,7 @@ function renderStatus(s) {
     document.getElementById("st-force").textContent = "—";
   }
   document.getElementById("st-target").textContent =
-    s.force ? `${fmt(targetForceN ?? 50, 0)} N` : "—";
+    targetForceN > 0 ? `${targetForceN} N` : (s.force ? "50 N (默认)" : "—");
 
   if (s.force && s.force.corr_cumulative_mm) {
     const [cx, cy, cz] = s.force.corr_cumulative_mm;
@@ -249,6 +249,9 @@ function startStream() {
     if (frame.tcp) latestWrench = frame.tcp;
     if (frame.robot_status !== undefined && frame.robot_status !== null) {
       lastRobotStatus = frame.robot_status;
+    }
+    if (frame.forcedata !== undefined && frame.forcedata !== null) {
+      targetForceN = frame.forcedata;  // 机器人下发的恒力目标值 (N)
     }
     const tSec = frameTimeSec(frame.timestamp);
     chartForce.push(tSec, frame.tcp.slice(0, 3));

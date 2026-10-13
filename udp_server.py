@@ -330,8 +330,19 @@ class RSIServer:
                 rsi_data.ipoc_text = ipoc_elem.text.strip()
                 rsi_data.iPOC = int(rsi_data.ipoc_text)
 
+            # XML 标签大小写不敏感查找（机器人侧可能发 ForceData/FORCEDATA/forcedata 等）
+            def _find_elem(root, tag):
+                direct = root.find(f".//{tag}")
+                if direct is not None:
+                    return direct
+                tag_lower = tag.lower()
+                for elem in root.iter():
+                    if elem.tag.lower() == tag_lower:
+                        return elem
+                return None
+
             for tag, elem_type, _ in self.SEND_ELEMENTS:
-                elem = root.find(f".//{tag}")
+                elem = _find_elem(root, tag)
                 if elem is not None and elem.text:
                     value = elem.text.strip()
                     if elem_type in ("LONG", "INT"):
